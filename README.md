@@ -105,6 +105,7 @@ domador              # arranca el motor y abre la UI en el navegador
 domador serve        # sólo el servidor (UI + API), sin abrir nada
 domador serve --port 9000
 domador mcp          # servidor MCP por stdio (lo lanza el cliente, no vos)
+domador --version    # versión del binario
 ```
 
 Sin argumentos arranca el motor, levanta la API en segundo plano y abre `http://127.0.0.1:8787`.
@@ -144,6 +145,8 @@ mcp_servers:
 ```
 
 Reiniciá el cliente después de agregarlo. Las herramientas se llaman `domador_status`, `domador_processes`, `domador_set_priority`, `domador_set_affinity`, `domador_set_eco`, `domador_profile`, `domador_add_rule`, `domador_restore`, `domador_power_plans` y `domador_log`.
+
+El servidor MCP habla con la API en el puerto 8787 por defecto. Si levantás `serve --port 9000`, pasale el mismo a `mcp --port 9000` o definí `DOMADOR_PORT=9000` en el entorno del cliente.
 
 ### Endpoints HTTP
 

@@ -502,12 +502,23 @@ impl Engine {
             .find(|r| r.id == id)
             .cloned()
             .ok_or("Regla no encontrada")?;
-        let targets: Vec<(u32, String)> = self
-            .rows
-            .iter()
-            .filter(|row| rule_matches_plain(&rule, row))
-            .map(|r| (r.pid, r.name.clone()))
-            .collect();
+        let path_rule = rule.pattern.contains('\\') || rule.pattern.contains('/');
+        let mut targets: Vec<(u32, String)> = Vec::new();
+        for index in 0..self.rows.len() {
+            let row = self.rows[index].clone();
+            let mut matched = rule_matches_plain(&rule, &row);
+            if !matched && path_rule && row.exe.is_empty() {
+                if let Some(found) = win::process_exe(row.pid) {
+                    self.exe_cache.insert(row.key(), found.clone());
+                    let mut probe = row.clone();
+                    probe.exe = found;
+                    matched = rule_matches_plain(&rule, &probe);
+                }
+            }
+            if matched {
+                targets.push((row.pid, row.name));
+            }
+        }
         let mut count = 0;
         for (pid, name) in targets {
             match self.apply_rule(pid, &rule) {
@@ -1848,9 +1859,12 @@ fn normalize_rule(payload: &Value, existing: Option<Rule>) -> Result<Rule, Strin
 fn rule_matches_plain(rule: &Rule, row: &ProcessRow) -> bool {
     let pattern = rule.pattern.trim();
     if pattern.contains('\\') || pattern.contains('/') {
+        if row.exe.is_empty() {
+            return false;
+        }
         let normalized = pattern.replace('/', "\\");
         let base = normalized.rsplit('\\').next().unwrap_or(&normalized);
-        wildcard(base, &row.name) && (row.exe.is_empty() || wildcard(&normalized, &row.exe))
+        wildcard(base, &row.name) && wildcard(&normalized, &row.exe)
     } else {
         wildcard(pattern, &row.name)
     }
