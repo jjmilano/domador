@@ -282,6 +282,9 @@ impl Engine {
             return;
         }
         let alive: KeySet = self.rows.iter().map(|r| r.key()).collect();
+        self.applied.retain(|k, _| alive.contains(k));
+        self.pb.retain(|k, _| alive.contains(k));
+        self.rules_done.retain(|k| alive.contains(k));
         if self.meta.len() > 900 {
             self.meta.retain(|k, _| alive.contains(k));
         }
@@ -464,13 +467,16 @@ impl Engine {
                     "rule",
                     format!("regla «{}» aplicada a {} (PID {})", rule.pattern, name, pid),
                 ),
-                Err(err) => self.log(
-                    "warn",
-                    format!(
-                        "la regla «{}» falló en {} (PID {}): {}",
-                        rule.pattern, name, pid, err
-                    ),
-                ),
+                Err(err) => {
+                    self.rules_done.remove(&key);
+                    self.log(
+                        "warn",
+                        format!(
+                            "la regla «{}» falló en {} (PID {}): {}",
+                            rule.pattern, name, pid, err
+                        ),
+                    )
+                }
             }
         }
     }
@@ -966,6 +972,12 @@ impl Engine {
         let Some(record) = self.pb.remove(&key) else {
             return;
         };
+        // Si el PID ya no es el mismo proceso (Windows reutiliza PIDs), no
+        // tocar la prioridad de un proceso ajeno.
+        if !self.rows.iter().any(|row| row.key() == key) {
+            self.meta.remove(&key);
+            return;
+        }
         let mut error = None;
         if let Err(err) = win::set_priority_class(record.pid, record.orig_nice) {
             error = Some(err);
@@ -1107,7 +1119,7 @@ impl Engine {
                 && matches.len() > rule.watchdog.max_instances as usize
             {
                 let mut sorted = matches.clone();
-                sorted.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
                 let extra = sorted.len() - rule.watchdog.max_instances as usize;
                 for (pid, name, _) in sorted.into_iter().take(extra) {
                     if pid == std::process::id() {

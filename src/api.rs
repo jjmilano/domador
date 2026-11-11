@@ -42,6 +42,27 @@ fn handle(mut request: Request, engine: Shared) {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or("/").to_string();
 
+    // Sólo aceptar Host loopback: corta DNS rebinding contra la API local.
+    let host_ok = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Host"))
+        .map(|header| {
+            let host = header.value.as_str().trim().to_ascii_lowercase();
+            host == "127.0.0.1"
+                || host == "localhost"
+                || host.starts_with("127.0.0.1:")
+                || host.starts_with("localhost:")
+        })
+        .unwrap_or(false);
+    if !host_ok {
+        return reply(
+            request,
+            403,
+            &json!({"ok": false, "error": "Host no permitido"}),
+        );
+    }
+
     if method == Method::Get {
         match path.as_str() {
             "/api/health" => {
@@ -251,7 +272,11 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, String> 
         }
         "/api/shutdown" => {
             lock(engine).shutdown();
-            std::process::exit(0);
+            thread::spawn(|| {
+                thread::sleep(std::time::Duration::from_millis(150));
+                std::process::exit(0);
+            });
+            Ok(json!({"ok": true}))
         }
         other => Err(format!("endpoint desconocido: {other}")),
     }
@@ -264,7 +289,7 @@ fn lock(engine: &Shared) -> std::sync::MutexGuard<'_, Engine> {
 fn pid_of(body: &Value) -> Result<u32, String> {
     body.get("pid")
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
+        .and_then(|v| u32::try_from(v).ok())
         .ok_or_else(|| "Falta pid".to_string())
 }
 

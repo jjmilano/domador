@@ -111,27 +111,10 @@
         "samples": 37,
         "processes": 1
       },
-      "domador_engine": {
-        "rss_avg_mb": 40.4,
-        "rss_peak_mb": 41.0,
-        "cpu_avg_pct": 0.25,
-        "cpu_peak_pct": 0.74,
-        "samples": 39,
-        "processes": 2
-      },
-      "domador_ui": {
-        "rss_avg_mb": 798.4,
-        "rss_peak_mb": 885.1,
-        "cpu_avg_pct": 2.91,
-        "cpu_peak_pct": 8.27,
-        "samples": 29,
-        "processes": 8
-      },
       "lasso_pids": [
         6232,
         9172
-      ],
-      "domador_ui_processes": 8
+      ]
     },
     "pb": {
       "events": [

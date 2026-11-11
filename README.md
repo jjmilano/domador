@@ -4,7 +4,7 @@ Control de procesos y rendimiento para Windows, escrito en Rust. Una alternativa
 
 Un solo `.exe`. Sin dependencias en tiempo de ejecución. Sin llamadas a casa.
 
-**Descargar:** [Domador v0.4.0](https://github.com/jjmilano/domador/releases/tag/v0.4.0) · Windows 10/11 x64.
+**Descargar:** [Domador v0.4.1](https://github.com/jjmilano/domador/releases/tag/v0.4.1) · Windows 10/11 x64.
 
 ![UI de Domador](docs/screenshot.png)
 
@@ -16,7 +16,7 @@ Domador hace lo mismo (y algunas cosas más) con el código a la vista: reglas p
 
 ## Estado
 
-v0.4, usable y probado en Windows 11. El motor Rust, la UI web, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP y snapshot NT (5/5). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
+v0.4, usable y probado en Windows 11. El motor Rust, la UI web, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP, snapshot NT y parsing de `powercfg` (6/6). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
 
 Lo que falta está en el roadmap: icono de bandeja, servicio elevado para procesos protegidos y CPU sets. Nada de eso impide usarlo hoy.
 
@@ -73,27 +73,27 @@ Perfiles listos para usar, cada uno con su combinación de plan de energía, Pro
 ### API HTTP local, servidor MCP y UI web
 
 - `domador serve` levanta un servidor HTTP en `127.0.0.1` (puerto 8787 por defecto, `--port` para cambiarlo) que sirve la UI web y la API JSON.
-- `domador mcp` expone las mismas operaciones como servidor MCP por stdio, así un agente (Claude, Codex, Hermes) puede leer el estado, aplicar reglas y cambiar de perfil con herramientas normales.
+- `domador mcp` expone las mismas operaciones como servidor MCP por stdio, así un agente (Claude, Codex, Hermes) puede leer el estado, aplicar reglas y cambiar de perfil con herramientas normales. Es un proxy: **requiere que `domador serve` esté corriendo** en el mismo puerto (8787 por defecto).
 - La UI es HTML/JS plano sin build: tabla de procesos, reglas, actividad del motor, ajustes y medidores por núcleo.
 
 ## Seguridad
 
 Leé esto antes de apretar Full Power.
 
-- **Full Power requiere estar enchufado.** Con batería se rechaza: el perfil desactiva límites de energía y te la come en minutos.
+- **Full Power avisa si estás con batería, pero no lo bloquea.** La UI pide confirmación; por CLI/API se aplica igual. El perfil desactiva límites de energía y te la come en minutos: usalo enchufado.
 - **Calienta y consume.** Es esperable. Si la notebook throttlea, el perfil no hace magia: sólo deja de frenar.
 - **El plan de energía original se restaura al salir**, también con Ctrl+C. Si el proceso muere de golpe (crash, Task Manager), el plan queda como estaba en ese momento.
 - **No requiere admin para lo básico**: prioridades, afinidad y EcoQoS sobre procesos propios funcionan sin elevar. Procesos del sistema y algunos servicios van a rechazar los cambios; la UI muestra `sin admin` cuando corre sin privilegios.
 - **Sí requiere admin** para: prioridades sobre procesos de otros usuarios, `realtime`, y varias operaciones de plan de energía en máquinas con políticas de grupo.
-- **La API escucha sólo en loopback** y no tiene autenticación. Cualquier proceso local puede llamarla: no la expongas a la red.
+- **La API escucha sólo en loopback** y los POST exigen el header `X-Domador: 1`. Eso es un guard CSRF, no autenticación: cualquier proceso local puede llamarla. No la expongas a la red.
 - **Sin telemetría.** No hay analytics, ni crash reporting, ni update check. El binario no abre conexiones salientes.
 
 ## Instalación
 
-Requisitos: Windows 10 u 11 (x64), Rust stable (1.75 o posterior).
+Requisitos: Windows 10 u 11 (x64), Rust 1.88 o posterior y un linker de Windows (MSVC Build Tools, o WinLibs si usás el toolchain GNU).
 
 ```bash
-git clone https://github.com/<usuario>/domador.git
+git clone https://github.com/jjmilano/domador.git
 cd domador
 cargo build --release
 ```
@@ -189,7 +189,7 @@ Medición real en esta notebook (Legion, 16 hilos lógicos, Windows 11), misma s
 | Primer throttle | 0,1 s | 8,8 s |
 | Latencia de acciones p50 / p95 | sin API ni CLI documentada | 2,37 / 25,42 ms |
 | Distribución | instalador + servicio | un `.exe` de 2,02 MB |
-| Churn real (30 min de su log) | 35 bajadas sobre 5 procesos, incluidos Chrome, WebView y Hermes | — |
+| Churn real (30 min de su log) | 35 bajadas sobre 5 procesos, incluidos Chrome, WebView y ChatGPT | — |
 
 **Lectura honesta:** Lasso gana en reacción inicial; Domador gana en huella (17,3 MB y 0,12% contra 20 MB y 0,19%), en estabilidad (la mitad de cambios de prioridad), en tamaño de distribución, en automatización (API/MCP) y en no necesitar servicio. La UI de Domador es una pestaña del Edge que ya está abierto, así que su costo no es comparable con una GUI nativa; el motor es el número que importa cuando jugás.
 

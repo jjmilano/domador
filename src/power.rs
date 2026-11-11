@@ -37,7 +37,11 @@ pub fn active_plan() -> Option<String> {
 }
 
 pub fn set_active(guid: &str) -> Result<(), String> {
-    run(&["/setactive", guid]).map(|_| ())
+    let normalized = guid.trim().to_lowercase();
+    if find_guid(&normalized).as_deref() != Some(normalized.as_str()) {
+        return Err(format!("GUID de energía inválido: {guid}"));
+    }
+    run(&["/setactive", &normalized]).map(|_| ())
 }
 
 pub fn find_plan(plans: &[PowerPlan], needle: &str) -> Option<PowerPlan> {
@@ -145,10 +149,10 @@ fn run(args: &[&str]) -> Result<String, String> {
 }
 
 pub fn find_guid(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 36 <= bytes.len() {
-        let candidate = &text[i..i + 36];
+    for (i, _) in text.char_indices() {
+        let Some(candidate) = text.get(i..i + 36) else {
+            continue;
+        };
         let parts: Vec<&str> = candidate.split('-').collect();
         let ok = parts.len() == 5
             && parts[0].len() == 8
@@ -160,7 +164,20 @@ pub fn find_guid(text: &str) -> Option<String> {
         if ok {
             return Some(candidate.to_string());
         }
-        i += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_guid;
+
+    #[test]
+    fn encuentra_guid_y_sobrevive_texto_no_ascii() {
+        assert_eq!(find_guid("Esquemas de energía existentes:"), None);
+        assert_eq!(
+            find_guid("Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)"),
+            Some("381b4222-f694-41f0-9685-ff5bb260df2e".to_string())
+        );
+    }
 }
