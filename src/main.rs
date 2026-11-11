@@ -17,7 +17,17 @@ fn main() {
     let result = match command {
         "run" => run_server(port, !args.iter().any(|a| a == "--no-open")),
         "serve" => run_server(port, false),
-        "mcp" => mcp::run(port),
+        "mcp" => {
+            let mcp_port = flag(&args, "--port")
+                .and_then(|v| v.parse().ok())
+                .or_else(|| {
+                    std::env::var("DOMADOR_PORT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                })
+                .unwrap_or(port);
+            mcp::run(mcp_port)
+        }
         "status" => cli_status(port),
         "profile" => cli_profile(&args, port),
         "power" => cli_power(&args, port),
