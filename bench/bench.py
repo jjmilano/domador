@@ -240,8 +240,8 @@ def summarize(events):
                 "transitions": len(items),
                 "throttles": len(throttles),
                 "restores": len(restores),
-                "first_throttle_s": throttles[0]["t"] if throttles else None,
-                "first_restore_s": restores[0]["t"] if restores else None,
+                "first_throttle_s": round(throttles[0]["t"], 1) if throttles else None,
+                "first_restore_s": round(restores[0]["t"], 1) if restores else None,
             }
         )
     return out

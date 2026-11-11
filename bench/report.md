@@ -8,7 +8,7 @@ Generado: 2026-11-11T16:32:27
 | CPU motor | 0.19% | 0.431% |
 | RAM app completa | 64.8 MB (GUI nativa) | UI en pestaña de Edge (comparte proceso) |
 | Cambios de prioridad (42 s) | 8 | 4 |
-| Primer throttle | 0.1006474494934082 s | 8.8 s |
+| Primer throttle | 0,1 s | 8,8 s |
 | Latencia p50 / p95 | sin API | 1.19 / 21.54 ms |
 | Binario | instalador + servicio | 2.11 MB, un .exe |
 
