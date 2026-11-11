@@ -4,6 +4,8 @@ Control de procesos y rendimiento para Windows, escrito en Rust. Una alternativa
 
 Un solo `.exe`. Sin dependencias en tiempo de ejecución. Sin llamadas a casa.
 
+**Descargar:** [Domador v0.4.0](https://github.com/jjmilano/domador/releases/tag/v0.4.0) · Windows 10/11 x64.
+
 ![UI de Domador](docs/screenshot.png)
 
 ## Por qué
