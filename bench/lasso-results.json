@@ -1,0 +1,580 @@
+{
+  "machine": {
+    "os": "Windows-11-10.0.26220-SP0",
+    "cpu": "AMD Ryzen 7 5800H with Radeon Graphics",
+    "cores_logical": 16,
+    "cores_physical": 8,
+    "ram_gb": 31.9,
+    "python": "3.13.14",
+    "lasso_version": "Process Lasso (instalado)"
+  },
+  "lasso_config": {
+    "Administration": {
+      "Version": "6770500",
+      "ConfigPasswordMD5": ""
+    },
+    "OutOfControlProcessRestraint": {
+      "OocOn": "true",
+      "ExcludeChildrenOfForeground": "true",
+      "DisableProBalanceWhenSysIdle": "false",
+      "ProBalanceDropOneRandomCore": "false",
+      "DoNotAdjustAffinityIfCustomized": "true",
+      "OocDisableCoreParkingWhileIn": "false",
+      "UseEfficiencyMode": "false",
+      "DisableProBalanceIfSysIdleThisManyMS": "30000",
+      "TotalProcessorUsageBeforeRestraint": "10",
+      "PerProcessUsageBeforeRestraint": "5",
+      "TimeOverQuotaBeforeRestraint": "900",
+      "PerProcessUsageForRestore": "2",
+      "PlayOnRestraint": "C:\\WINDOWS\\media\\Windows Pop-up Blocked.wav",
+      "PlayOnRestore": "C:\\WINDOWS\\media\\Windows Feed Discovered.wav",
+      "MinimumTimeOfRestraint": "4200",
+      "MaximumTimeOfRestraint": "0",
+      "TameOnlyNormal": "true",
+      "LowerToIdleInsteadOfBelowNormal": "false",
+      "ExcludeServices": "true",
+      "PlaySoundOnRestraint": "false",
+      "PlaySoundOnRestore": "false",
+      "RestrainByAffinity": "false",
+      "RestraintAffinity": "",
+      "ExcludeForegroundProcesses2": "true",
+      "DoNotLowerPriorityClass": "false",
+      "LowerIOPriorityDuringRestraint": "false",
+      "MatchExclusionsByPathnameToo": "false",
+      "ChangeTrayIconOnRestraint": "true",
+      "OocExclusions": "",
+      "OocHardCodedExclusionOverrides": ""
+    },
+    "GUI": {
+      "ClearLogAtExit": "false",
+      "ShowCPUCoreUtilGraphs": "true",
+      "ShowGraphLegend": "true",
+      "ShowGraphCPU": "true",
+      "ShowGraphResponsiveness": "true",
+      "ShowGraphMemoryLoad": "true",
+      "ShowGraphProBalanceEvents": "true",
+      "ShowGraphSelectedProcessesCPUHistory": "true",
+      "ShowGraphGPU": "true",
+      "GraphGPUShowAllLines": "false",
+      "GraphGPUCombinedWidget": "false",
+      "GPUCollectMode": "0",
+      "GraphAntiAliasing": "true",
+      "ProBalanceCountersOnGraph": "true",
+      "ShowGraphLicenseName": "false",
+      "ShowPowerProfile": "true",
+      "GraphShowTooltips": "true",
+      "ShowCPUUtilityAsPrimary": "true"
+    },
+    "Advanced": {
+      "AutomaticUpdate": "false"
+    },
+    "Performance": {
+      "ManageOnlyCurrentUser": "false",
+      "ExitOnCloseWindow": "false",
+      "SoundsOff": "true",
+      "IsConfigWritable": "true",
+      "ForcedMode": "false",
+      "IgnoreProblematicProcesses": "false",
+      "AllowBlacklistedProcesses": "false",
+      "IgnoreSuspendedProcesses": "false",
+      "RecentlyTerminatedViewExclusions": "conhost.exe,dllhost.exe,runtimebroker.exe,sppsvc.exe,svchost.exe,taskhostw.exe",
+      "SetTimerResolutionAtStartup": "0"
+    },
+    "Sampling": {
+      "SamplingEnabled": "false",
+      "SamplingIntervalSeconds": "900",
+      "SamplingOutputPath": "",
+      "SamplingIncludePattern": "*",
+      "SamplingExcludePattern": ""
+    },
+    "ForegroundBoosting": {
+      "BoostForegroundProcess": "false",
+      "ForegroundBoostPriorityClass": "0x8000",
+      "ForegroundBoostGPU": "-1",
+      "BoostOnlyNormal": "true",
+      "BoostOnlyNormalGPU": "true",
+      "ForegroundBoostExclusions": ""
+    },
+    "SystemTrayIcon": {
+      "UseStaticIcon": "false",
+      "ShowResponsivnessInTrayInsteadOfProcessorUsage": "false"
+    },
+    "Logging": {
+      "LogDisable": "false",
+      "IncludeCommandLines": "false",
+      "LogSmartTrim": "true",
+      "LogCPULimiter": "true",
+      "LogStartupBoostActions": "true",
+      "LogEfficiencyMode": "true",
+      "LogGroupExtender": "true",
+      "LogCPUSets": "true",
+      "LogProBalanceParkingChanges": "true",
+      "LogProcessExecutions": "false",
+      "LogProcessTerminations": "false",
+      "LogProcessesDisallowed": "true",
+      "LogDefaultPriorityAdjustments": "true",
+      "LogDefaultAffinityAdjustments": "true",
+      "LogProBalanceBegin": "true",
+      "LogProBalanceEnd": "true",
+      "LogInstanceLimitTerminations": "true",
+      "LogPowerProfileChanges": "true"
+    },
+    "MemoryManagement": {
+      "SmartTrimIsEnabled": "true",
+      "SmartTrimWorkingSetTrims": "false",
+      "SmartTrimClearStandbyList": "false",
+      "SmartTrimClearFileCache": "false",
+      "SmartTrimLogNoAction": "true",
+      "ClearStandbyFreeRAMThresholdMB": "1024",
+      "ClearStandbyOnlyInPerfMode": "true",
+      "SmartTrimExclusions": "",
+      "SmartTrimAutoMinimumRAMLoad": "65",
+      "MinimumProcessWSSInMb": "196",
+      "SmartTrimIntervalMins": "15"
+    },
+    "SysTrayBalloons": {
+      "EnableSystemTrayNotification": "false",
+      "BalloonTipDuration": "10000",
+      "ShowBalloonsForOocPriorityRestoration": "false"
+    },
+    "ProcessAllowances": {
+      "EfficiencyMode": ""
+    },
+    "ProcessDefaults": {
+      "MatchWildcardsToPathnames": "true",
+      "MatchOnCommandLine": "false"
+    },
+    "AdvancedRules": {
+      "DivideCPUPercentThresholdsBySystemCPUCount": "false",
+      "ProcessorGroupExtended": "",
+      "ProhibitInternetExplorerExceptWhenAny": "",
+      "WatchdogRules2": ""
+    },
+    "GamingMode": {
+      "GamingModeEnabled": "false",
+      "GamingChangePowerPlan": "true",
+      "TargetPowerPlan": "Bitsum Highest Performance",
+      "GamingModeEngageForSteam": "false",
+      "AutomaticGamingModeProcessPaths": "",
+      "AutomaticGamingModeUserExclusions": ""
+    },
+    "PowerManagement": {
+      "StartWithPowerPlan": "",
+      "Display": "",
+      "PC": ""
+    },
+    "PowerSaver": {
+      "PowerSaver_IdleTime": "0",
+      "EnergySaverEnabled": "false",
+      "EnergySaverForceActivePowerProfile": "false",
+      "EnergySaverUpPowerProfileName": "",
+      "EnergySaverEvents": "true",
+      "DisableEnergySaverDuringGamingMode": "true",
+      "EnergySaverUseCPUThreshold": "false",
+      "EnergySaverCPUThreshold": "5.00",
+      "PowerSaver_Exclusions": ""
+    },
+    "LoadBasedPowerSwitcher": {
+      "LoadBasedPowerSwitcherEnabled": "false",
+      "LoadBasedPowerSwitcherLowCPULoadThreshold": "10.00",
+      "LoadBasedPowerSwitcherHighCPULoadThreshold": "50.00",
+      "LoadBasedPowerSwitcherMinimumTimeInPowerPlanMs": "5000",
+      "LoadBasedPowerSwitcherAveragingWindowSamples": "5",
+      "LoadBasedPowerSwitcherLoggingEnabled": "true",
+      "LoadBasedPowerSwitcherDeferLowPlan": "true"
+    }
+  },
+  "lasso_log": {
+    "window_min": 30,
+    "probalance_events": 140,
+    "lowered": 35,
+    "restored": 32,
+    "distinct_processes": 5,
+    "lowered_per_min": 1.17,
+    "top_processes": [
+      {
+        "name": "chrome.exe",
+        "lowered": 26
+      },
+      {
+        "name": "msedgewebview2.exe",
+        "lowered": 5
+      },
+      {
+        "name": "powershell.exe",
+        "lowered": 2
+      },
+      {
+        "name": "python3.13.exe",
+        "lowered": 1
+      },
+      {
+        "name": "chatgpt.exe",
+        "lowered": 1
+      }
+    ]
+  },
+  "features": [
+    {
+      "feature": "ProBalanza (prioridad temporal)",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "Reglas persistentes por ejecutable",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "Prioridad de CPU / E/S / memoria",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "Afinidad de CPU (máscara)",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "CPU sets / grupos de procesador",
+      "domador": false,
+      "lasso": true
+    },
+    {
+      "feature": "Watchdog: relanzar / limitar instancias",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "SmartTrim de RAM",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "Planes de energía automáticos",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "Boost de primer plano",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "Protege apps con ventana visible",
+      "domador": true,
+      "lasso": false
+    },
+    {
+      "feature": "Cooldown anti-flapping",
+      "domador": true,
+      "lasso": false
+    },
+    {
+      "feature": "API HTTP/JSON para automatizar",
+      "domador": true,
+      "lasso": false
+    },
+    {
+      "feature": "Acciones por lote",
+      "domador": true,
+      "lasso": false
+    },
+    {
+      "feature": "UI web moderna",
+      "domador": true,
+      "lasso": false
+    },
+    {
+      "feature": "Ícono de bandeja",
+      "domador": false,
+      "lasso": true
+    },
+    {
+      "feature": "Servicio elevado siempre activo",
+      "domador": false,
+      "lasso": true
+    },
+    {
+      "feature": "Config portable / legible",
+      "domador": true,
+      "lasso": true
+    },
+    {
+      "feature": "Sin telemetría",
+      "domador": true,
+      "lasso": true
+    }
+  ],
+  "footprint": {
+    "lasso_full": {
+      "rss_avg_mb": 64.8,
+      "rss_peak_mb": 64.9,
+      "cpu_avg_pct": 0.58,
+      "cpu_peak_pct": 1.8,
+      "samples": 37,
+      "processes": 2
+    },
+    "lasso_engine": {
+      "rss_avg_mb": 20.0,
+      "rss_peak_mb": 20.0,
+      "cpu_avg_pct": 0.19,
+      "cpu_peak_pct": 0.54,
+      "samples": 37,
+      "processes": 1
+    },
+    "domador_engine": {
+      "rss_avg_mb": 40.4,
+      "rss_peak_mb": 41.0,
+      "cpu_avg_pct": 0.25,
+      "cpu_peak_pct": 0.74,
+      "samples": 39,
+      "processes": 2
+    },
+    "domador_ui": {
+      "rss_avg_mb": 798.4,
+      "rss_peak_mb": 885.1,
+      "cpu_avg_pct": 2.91,
+      "cpu_peak_pct": 8.27,
+      "samples": 29,
+      "processes": 8
+    },
+    "lasso_pids": [
+      6232,
+      9172
+    ],
+    "domador_ui_processes": 8
+  },
+  "lasso_probalance": {
+    "events": [
+      {
+        "t": 0.1006474494934082,
+        "pid": 752,
+        "old": 32,
+        "new": 16384
+      },
+      {
+        "t": 0.10067367553710938,
+        "pid": 59264,
+        "old": 32,
+        "new": 16384
+      },
+      {
+        "t": 12.451271057128906,
+        "pid": 752,
+        "old": 16384,
+        "new": 32
+      },
+      {
+        "t": 12.45128345489502,
+        "pid": 59264,
+        "old": 16384,
+        "new": 32
+      },
+      {
+        "t": 18.674427032470703,
+        "pid": 752,
+        "old": 32,
+        "new": 16384
+      },
+      {
+        "t": 18.67444157600403,
+        "pid": 59264,
+        "old": 32,
+        "new": 16384
+      },
+      {
+        "t": 30.922452449798584,
+        "pid": 752,
+        "old": 16384,
+        "new": 32
+      },
+      {
+        "t": 30.92246389389038,
+        "pid": 59264,
+        "old": 16384,
+        "new": 32
+      }
+    ],
+    "summary": [
+      {
+        "pid": 752,
+        "transitions": 4,
+        "throttles": 4,
+        "restores": 4,
+        "first_throttle_s": 0.1,
+        "first_restore_s": 0.1
+      },
+      {
+        "pid": 59264,
+        "transitions": 4,
+        "throttles": 4,
+        "restores": 4,
+        "first_throttle_s": 0.1,
+        "first_restore_s": 0.1
+      }
+    ],
+    "cpu_share_pct": 24.9,
+    "log_events": [
+      {
+        "t": -0.8,
+        "action": "(0x2b) ProBalance begun",
+        "code": "43"
+      },
+      {
+        "t": -0.8,
+        "action": "(0x2c) Process priority temporarily lowered by ProBalance",
+        "code": "44"
+      },
+      {
+        "t": -0.8,
+        "action": "(0x2b) ProBalance begun",
+        "code": "43"
+      },
+      {
+        "t": -0.8,
+        "action": "(0x2c) Process priority temporarily lowered by ProBalance",
+        "code": "44"
+      },
+      {
+        "t": 12.2,
+        "action": "(0x2e) Restored original process priority",
+        "code": "46"
+      },
+      {
+        "t": 12.2,
+        "action": "(0x20) ProBalance restraint ended",
+        "code": "32"
+      },
+      {
+        "t": 12.2,
+        "action": "(0x2e) Restored original process priority",
+        "code": "46"
+      },
+      {
+        "t": 12.2,
+        "action": "(0x20) ProBalance restraint ended",
+        "code": "32"
+      },
+      {
+        "t": 18.2,
+        "action": "(0x2b) ProBalance begun",
+        "code": "43"
+      },
+      {
+        "t": 18.2,
+        "action": "(0x2c) Process priority temporarily lowered by ProBalance",
+        "code": "44"
+      },
+      {
+        "t": 18.2,
+        "action": "(0x2b) ProBalance begun",
+        "code": "43"
+      },
+      {
+        "t": 18.2,
+        "action": "(0x2c) Process priority temporarily lowered by ProBalance",
+        "code": "44"
+      },
+      {
+        "t": 30.2,
+        "action": "(0x2e) Restored original process priority",
+        "code": "46"
+      },
+      {
+        "t": 30.2,
+        "action": "(0x20) ProBalance restraint ended",
+        "code": "32"
+      },
+      {
+        "t": 30.2,
+        "action": "(0x2e) Restored original process priority",
+        "code": "46"
+      },
+      {
+        "t": 30.2,
+        "action": "(0x20) ProBalance restraint ended",
+        "code": "32"
+      }
+    ]
+  },
+  "domador_probalance": {
+    "events": [
+      {
+        "t": 8.639244556427002,
+        "pid": 62672,
+        "old": 32768,
+        "new": 16384
+      },
+      {
+        "t": 8.639263153076172,
+        "pid": 31508,
+        "old": 32768,
+        "new": 16384
+      },
+      {
+        "t": 15.67018461227417,
+        "pid": 62672,
+        "old": 16384,
+        "new": 32768
+      },
+      {
+        "t": 15.670197248458862,
+        "pid": 31508,
+        "old": 16384,
+        "new": 32768
+      }
+    ],
+    "summary": [
+      {
+        "pid": 62672,
+        "transitions": 2,
+        "throttles": 1,
+        "restores": 2,
+        "first_throttle_s": 8.6,
+        "first_restore_s": 8.6
+      },
+      {
+        "pid": 31508,
+        "transitions": 2,
+        "throttles": 1,
+        "restores": 2,
+        "first_throttle_s": 8.6,
+        "first_restore_s": 8.6
+      }
+    ],
+    "cpu_share_pct": 24.9,
+    "log_events": [
+      {
+        "t": 8.6,
+        "msg": "ProBalanza bajó domador-hog.exe (PID 62672) a Bajo · 12% CPU sostenido"
+      },
+      {
+        "t": 8.6,
+        "msg": "ProBalanza bajó domador-hog.exe (PID 31508) a Bajo · 12% CPU sostenido"
+      },
+      {
+        "t": 15.7,
+        "msg": "ProBalanza restauró domador-hog.exe (PID 62672) · 0% de CPU"
+      },
+      {
+        "t": 15.7,
+        "msg": "ProBalanza restauró domador-hog.exe (PID 31508) · 0% de CPU"
+      }
+    ],
+    "tick_ms": {
+      "p50": 27.1,
+      "p95": 32.5,
+      "last": 29.6,
+      "n": 45
+    }
+  },
+  "latency": {
+    "n": 20,
+    "verified": 20,
+    "p50_ms": 12.71,
+    "p95_ms": 25.76,
+    "min_ms": 1.19,
+    "max_ms": 25.76
+  }
+}

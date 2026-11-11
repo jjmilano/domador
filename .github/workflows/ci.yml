@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build (windows-latest)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache de cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Formato (informativo)
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: Clippy (informativo)
+        run: cargo clippy --all-targets -- -D warnings
+        continue-on-error: true
+
+      - name: Tests
+        run: cargo test --all-targets --verbose
+
+      - name: Build release
+        run: cargo build --release --verbose
+
+      - name: Verificar binario
+        shell: pwsh
+        run: |
+          $exe = "target/release/domador.exe"
+          if (-not (Test-Path $exe)) { throw "No se generó $exe" }
+          Get-Item $exe | Select-Object Name, Length, LastWriteTime
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: domador-windows-x64
+          path: target/release/domador.exe
+          if-no-files-found: error
+          retention-days: 14
