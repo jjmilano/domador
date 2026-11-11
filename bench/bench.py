@@ -18,7 +18,7 @@ from pathlib import Path
 import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
-RUST = ROOT / "target" / "release" / "domador.exe"
+RUST = Path(os.environ.get("DOMADOR_BIN", ROOT / "target" / "release" / "domador.exe"))
 HOG = ROOT / "bench" / "domador-hog.exe"
 LASSO_RESULTS = ROOT / "bench" / "lasso-results.json"
 EDGE_CANDIDATES = [
@@ -123,7 +123,12 @@ def measure(pids=None, root_pid=None, seconds=20.0) -> dict:
         if root_pid is not None:
             try:
                 root = psutil.Process(root_pid)
-                return [root] + root.children(recursive=True)
+                kids = [
+                    child
+                    for child in root.children(recursive=True)
+                    if (child.name() or "").lower() != "conhost.exe"
+                ]
+                return [root] + kids
             except Exception:
                 return []
         out = []

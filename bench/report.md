@@ -1,22 +1,22 @@
 # Domador (Rust) vs Process Lasso — benchmark
 
-Generado: 2026-11-11T16:32:27
+Generado: 2026-11-11T17:13:15
 
 | Métrica | Process Lasso | Domador Rust |
 |---|---|---|
-| RAM motor | 20.0 MB | 29.7 MB |
-| CPU motor | 0.19% | 0.431% |
+| RAM motor | 20.0 MB | 17.3 MB |
+| CPU motor | 0.19% | 0.115% |
 | RAM app completa | 64.8 MB (GUI nativa) | UI en pestaña de Edge (comparte proceso) |
 | Cambios de prioridad (42 s) | 8 | 4 |
-| Primer throttle | 0,1 s | 8,8 s |
-| Latencia p50 / p95 | sin API | 1.19 / 21.54 ms |
-| Binario | instalador + servicio | 2.11 MB, un .exe |
+| Primer throttle | 0.1 s | 8.8 s |
+| Latencia p50 / p95 | sin API | 2.37 / 25.42 ms |
+| Binario | instalador + servicio | 2.02 MB, un .exe |
 
 ## ProBalance
 
-Lasso: [{"pid": 752, "transitions": 4, "throttles": 2, "restores": 2, "first_throttle_s": 0.1006474494934082, "first_restore_s": 12.451271057128906}, {"pid": 59264, "transitions": 4, "throttles": 2, "restores": 2, "first_throttle_s": 0.10067367553710938, "first_restore_s": 12.45128345489502}]
+Lasso: [{"pid": 752, "transitions": 4, "throttles": 2, "restores": 2, "first_throttle_s": 0.1, "first_restore_s": 12.5}, {"pid": 59264, "transitions": 4, "throttles": 2, "restores": 2, "first_throttle_s": 0.1, "first_restore_s": 12.5}]
 
-Domador: [{"pid": 40416, "transitions": 2, "throttles": 1, "restores": 1, "first_throttle_s": 8.8, "first_restore_s": 16.2}, {"pid": 1276, "transitions": 2, "throttles": 1, "restores": 1, "first_throttle_s": 8.8, "first_restore_s": 16.2}]
+Domador: [{"pid": 32336, "transitions": 2, "throttles": 1, "restores": 1, "first_throttle_s": 8.8, "first_restore_s": 15.8}, {"pid": 24840, "transitions": 2, "throttles": 1, "restores": 1, "first_throttle_s": 8.8, "first_restore_s": 15.8}]
 
 ## Churn real de Lasso (30 min de su log)
 

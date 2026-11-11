@@ -16,10 +16,6 @@ type KeySet = HashSet<Key>;
 
 const MB: u64 = 1024 * 1024;
 
-fn key_of(pid: u32, ct: f64) -> Key {
-    (pid, (ct * 100.0).round() as i64)
-}
-
 fn now_epoch() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -89,7 +85,6 @@ struct PbRecord {
     orig_nice: u32,
     orig_eco: Option<bool>,
     eco_done: bool,
-    avg: f64,
 }
 
 struct FgBoost {
@@ -108,7 +103,6 @@ pub struct Engine {
     pub history: VecDeque<HistoryPoint>,
     pub log_lines: VecDeque<LogEntry>,
     sampler: Sampler,
-    cpu_hist: HashMap<Key, VecDeque<f32>>,
     meta: HashMap<Key, Meta>,
     exe_cache: HashMap<Key, String>,
     applied: HashMap<Key, Original>,
@@ -122,7 +116,6 @@ pub struct Engine {
     pub profile: ProfileState,
     profile_applied: Vec<u32>,
     started: Instant,
-    started_epoch: f64,
     tick_ms: VecDeque<f64>,
     last_tick_ms: f64,
     pub ncpu: usize,
@@ -152,7 +145,6 @@ impl Engine {
             history: VecDeque::with_capacity(150),
             log_lines: VecDeque::with_capacity(400),
             sampler,
-            cpu_hist: HashMap::new(),
             meta: HashMap::new(),
             exe_cache: HashMap::new(),
             applied: HashMap::new(),
@@ -166,7 +158,6 @@ impl Engine {
             profile: ProfileState::default(),
             profile_applied: Vec::new(),
             started: Instant::now(),
-            started_epoch: now_epoch(),
             tick_ms: VecDeque::with_capacity(180),
             last_tick_ms: 0.0,
             ncpu,
@@ -882,7 +873,13 @@ impl Engine {
             if samples.len() > 60 {
                 samples.pop_front();
             }
-            if should_throttle(samples, cfg.threshold, cfg.sustain_s) {
+            if should_throttle(
+                samples,
+                cfg.threshold,
+                cfg.sustain_s,
+                cfg.fast_threshold,
+                cfg.fast_sustain_s,
+            ) {
                 let window: Vec<f64> = samples
                     .iter()
                     .rev()
@@ -943,7 +940,6 @@ impl Engine {
                 orig_nice: original,
                 orig_eco,
                 eco_done,
-                avg,
             },
         );
         self.log(
@@ -1421,6 +1417,12 @@ impl Engine {
             if let Some(v) = patch.get("sustain_s").and_then(|v| v.as_u64()) {
                 cfg.sustain_s = (v as u32).clamp(1, 60);
             }
+            if let Some(v) = patch.get("fast_threshold").and_then(|v| v.as_f64()) {
+                cfg.fast_threshold = v.clamp(0.0, 100.0);
+            }
+            if let Some(v) = patch.get("fast_sustain_s").and_then(|v| v.as_u64()) {
+                cfg.fast_sustain_s = (v as u32).clamp(0, 60);
+            }
             if let Some(v) = patch.get("restore_below").and_then(|v| v.as_f64()) {
                 cfg.restore_below = v.clamp(0.0, 100.0);
             }
@@ -1733,7 +1735,22 @@ pub fn fmt_cpus(cpus: &[u32], ncpu: usize) -> String {
     parts.join(",")
 }
 
-fn should_throttle(samples: &VecDeque<f64>, threshold: f64, sustain_s: u32) -> bool {
+fn should_throttle(
+    samples: &VecDeque<f64>,
+    threshold: f64,
+    sustain_s: u32,
+    fast_threshold: f64,
+    fast_sustain_s: u32,
+) -> bool {
+    if fast_threshold > 0.0 && fast_sustain_s > 0 {
+        let f = fast_sustain_s.max(1) as usize;
+        if samples.len() >= f {
+            let sum: f64 = samples.iter().rev().take(f).sum();
+            if sum / f as f64 >= fast_threshold {
+                return true;
+            }
+        }
+    }
     let n = sustain_s.max(1) as usize;
     if samples.len() < n {
         return false;

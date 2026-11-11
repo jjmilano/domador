@@ -1,13 +1,13 @@
 {
-  "generated": "2026-11-11T16:32:27",
-  "binary_mb": 2.11,
+  "generated": "2026-11-11T17:13:15",
+  "binary_mb": 2.02,
   "footprint": {
     "engine": {
-      "rss_avg_mb": 29.7,
-      "rss_peak_mb": 31.0,
-      "cpu_avg_pct": 0.431,
-      "cpu_peak_pct": 1.669,
-      "processes": 2
+      "rss_avg_mb": 17.3,
+      "rss_peak_mb": 17.8,
+      "cpu_avg_pct": 0.115,
+      "cpu_peak_pct": 0.374,
+      "processes": 1
     },
     "ui": null
   },
@@ -15,83 +15,83 @@
     "events": [
       {
         "t": 8.8,
-        "pid": 40416,
+        "pid": 32336,
         "old": 32768,
         "new": 16384
       },
       {
         "t": 8.8,
-        "pid": 1276,
+        "pid": 24840,
         "old": 32768,
         "new": 16384
       },
       {
-        "t": 16.2,
-        "pid": 40416,
+        "t": 15.8,
+        "pid": 32336,
         "old": 16384,
         "new": 32768
       },
       {
-        "t": 16.2,
-        "pid": 1276,
+        "t": 15.8,
+        "pid": 24840,
         "old": 16384,
         "new": 32768
       }
     ],
     "summary": [
       {
-        "pid": 40416,
+        "pid": 32336,
         "transitions": 2,
         "throttles": 1,
         "restores": 1,
         "first_throttle_s": 8.8,
-        "first_restore_s": 16.2
+        "first_restore_s": 15.8
       },
       {
-        "pid": 1276,
+        "pid": 24840,
         "transitions": 2,
         "throttles": 1,
         "restores": 1,
         "first_throttle_s": 8.8,
-        "first_restore_s": 16.2
+        "first_restore_s": 15.8
       }
     ],
     "log": [
       {
-        "ts": 1794425585.4070003,
-        "msg": "ProBalanza bajó domador-hog.exe (PID 1276) a Bajo · 12% CPU sostenido"
+        "ts": 1794428032.1657922,
+        "msg": "ProBalanza bajó domador-hog.exe (PID 32336) a Bajo · 12% CPU sostenido"
       },
       {
-        "ts": 1794425585.4070537,
-        "msg": "ProBalanza bajó domador-hog.exe (PID 40416) a Bajo · 12% CPU sostenido"
+        "ts": 1794428032.165837,
+        "msg": "ProBalanza bajó domador-hog.exe (PID 24840) a Bajo · 12% CPU sostenido"
       },
       {
-        "ts": 1794425592.6953273,
-        "msg": "ProBalanza restauró domador-hog.exe (PID 1276) · 0% de CPU"
+        "ts": 1794428039.2769213,
+        "msg": "ProBalanza restauró domador-hog.exe (PID 32336) · 0% de CPU"
       },
       {
-        "ts": 1794425592.6953695,
-        "msg": "ProBalanza restauró domador-hog.exe (PID 40416) · 0% de CPU"
+        "ts": 1794428039.2769575,
+        "msg": "ProBalanza restauró domador-hog.exe (PID 24840) · 0% de CPU"
       },
       {
-        "ts": 1794425599.9922378,
-        "msg": "ProBalanza bajó Granola.exe (PID 51032) a Bajo · 5% CPU sostenido"
+        "ts": 1794428060.8525715,
+        "msg": "ProBalanza bajó msedgewebview2.exe (PID 48220) a Bajo · 5% CPU sostenido"
       }
     ],
     "tick_ms": {
-      "p50": 38.1892,
-      "p95": 49.469899999999996,
-      "last": 33.3335,
-      "n": 44
+      "p50": 19.9311,
+      "p95": 38.021100000000004,
+      "last": 18.3051,
+      "n": 45
     }
   },
   "latency": {
     "n": 20,
     "verified": 20,
-    "p50_ms": 1.19,
-    "p95_ms": 21.54,
-    "min_ms": 0.71,
-    "max_ms": 21.54
+    "p50_ms": 2.37,
+    "p95_ms": 25.42,
+    "min_ms": 1.45,
+    "max_ms": 25.42
   },
   "lasso": {
     "footprint": {
@@ -190,16 +190,16 @@
           "transitions": 4,
           "throttles": 2,
           "restores": 2,
-          "first_throttle_s": 0.1006474494934082,
-          "first_restore_s": 12.451271057128906
+          "first_throttle_s": 0.1,
+          "first_restore_s": 12.5
         },
         {
           "pid": 59264,
           "transitions": 4,
           "throttles": 2,
           "restores": 2,
-          "first_throttle_s": 0.10067367553710938,
-          "first_restore_s": 12.45128345489502
+          "first_throttle_s": 0.1,
+          "first_restore_s": 12.5
         }
       ],
       "cpu_share_pct": 24.9,

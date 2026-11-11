@@ -14,7 +14,7 @@ Domador hace lo mismo (y algunas cosas más) con el código a la vista: reglas p
 
 ## Estado
 
-v0.3, usable y probado en Windows 11. El motor Rust, la UI web, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API y handshake MCP (4/4). El binario release pesa **2,1 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
+v0.4, usable y probado en Windows 11. El motor Rust, la UI web, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API y handshake MCP (4/4). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
 
 Lo que falta está en el roadmap: icono de bandeja, servicio elevado para procesos protegidos y CPU sets. Nada de eso impide usarlo hoy.
 
@@ -25,6 +25,7 @@ Lo que falta está en el roadmap: icono de bandeja, servicio elevado para proces
 El corazón del proyecto. Cada tanto mira el consumo de CPU por proceso y, cuando uno se pasa de rosca, lo baja de prioridad en lugar de matarlo.
 
 - Umbral configurable (`threshold`), tiempo que tiene que sostenerlo (`sustain_s`) y umbral de restauración (`restore_below`) con su propia espera (`restore_s`).
+- **Vía rápida** (`fast_threshold`, `fast_sustain_s`): si un proceso se come 25% o más de la máquina durante 2 s, se regula sin esperar los 9 s. Los picos moderados siguen la vía lenta para no flapear; el cooldown se aplica igual.
 - Baja a `below_normal` o `idle`, a elección, y opcionalmente activa EcoQoS mientras está regulado.
 - **Cooldown** (`cooldown_s`): después de restaurar un proceso no lo vuelve a tocar por un rato. Evita el ping-pong de prioridades que castiga el rendimiento más de lo que ayuda.
 - **Protección de apps interactivas**: `skip_foreground` no toca la ventana en primer plano y `skip_interactive` saltea cualquier proceso con ventana visible (navegador, chat, IDE). La lista `protect` es manual y tiene la última palabra.
@@ -177,15 +178,17 @@ Medición real en esta notebook (Legion, 16 hilos lógicos, Windows 11), misma s
 
 | Métrica | Process Lasso | Domador Rust |
 |---|---|---|
-| RAM del motor | 20,0 MB | 29,7 MB |
-| CPU del motor (idle) | 0,19% | 0,43% |
+| RAM del motor | 20,0 MB | 17,3 MB |
+| CPU del motor (idle) | 0,19% | 0,12% |
 | Cambios de prioridad en 42 s (2 hogs) | 8 (4 por proceso: 2 bajadas + 2 restauraciones) | 4 (2 por proceso: 1 bajada + 1 restauración) |
 | Primer throttle | 0,1 s | 8,8 s |
-| Latencia de acciones p50 / p95 | sin API ni CLI documentada | 1,19 / 21,54 ms |
-| Distribución | instalador + servicio | un `.exe` de 2,11 MB |
+| Latencia de acciones p50 / p95 | sin API ni CLI documentada | 2,37 / 25,42 ms |
+| Distribución | instalador + servicio | un `.exe` de 2,02 MB |
 | Churn real (30 min de su log) | 35 bajadas sobre 5 procesos, incluidos Chrome, WebView y Hermes | — |
 
-**Lectura honesta:** Lasso gana en huella del motor y en reacción inicial; Domador gana en estabilidad (la mitad de cambios de prioridad), en tamaño de distribución, en automatización (API/MCP) y en no necesitar servicio. La UI de Domador es una pestaña del Edge que ya está abierto, así que su costo no es comparable con una GUI nativa; el motor es el número que importa cuando jugás.
+**Lectura honesta:** Lasso gana en reacción inicial; Domador gana en huella (17,3 MB y 0,12% contra 20 MB y 0,19%), en estabilidad (la mitad de cambios de prioridad), en tamaño de distribución, en automatización (API/MCP) y en no necesitar servicio. La UI de Domador es una pestaña del Edge que ya está abierto, así que su costo no es comparable con una GUI nativa; el motor es el número que importa cuando jugás.
+
+La vía rápida de ProBalance, medida aparte con un hog de 4 hilos (25% de la máquina), baja la prioridad en **1,8 s** sin esperar los 9 s. Los picos moderados siguen la vía lenta para no flapear.
 
 No hay FPS medidos todavía. El próximo benchmark serio es con CapFrameX: mismo juego, misma escena, con y sin perfil Juego.
 
@@ -198,7 +201,8 @@ src/
 ├── main.rs     CLI: domador, domador serve, domador mcp
 ├── win.rs      Wrapper crudo de Win32 (OpenProcess, SetPriorityClass, SetProcessAffinityMask,
 │               SetProcessInformation/EcoQoS, EmptyWorkingSet, ventanas visibles, planes de energía)
-├── sys.rs      Snapshots de procesos vía sysinfo (CPU + RAM, sin I/O por proceso)
+├── sys.rs      Sampler: un snapshot NT por tick (procesos) + sysinfo sólo CPU/RAM global
+├── nt.rs       Wrapper de NtQuerySystemInformation(ProcessInformation) y parser del buffer
 ├── engine.rs   Loop del motor: evaluación ProBalance, aplicación de reglas, watchdogs, cooldown
 ├── power.rs    Planes de energía, perfiles y restauración al salir
 ├── api.rs      Servidor HTTP local (tiny_http) y handlers JSON

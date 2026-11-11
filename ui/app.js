@@ -571,6 +571,10 @@ function settingsModal() {
         '<div class="field"><label>Restaurar tras (s)</label><input type="number" id="sPbRestoreS" min="1" max="120" value="' + pb.restore_s + '"></div>' +
         '<div class="field"><label>Bajar a</label><select id="sPbPriority">' + trimPrio + "</select></div>" +
       "</div>" +
+      '<div class="grid2">' +
+        '<div class="field"><label>Vía rápida: umbral (%)</label><input type="number" id="sPbFastThreshold" min="0" max="100" value="' + (pb.fast_threshold ?? 25) + '"></div>' +
+        '<div class="field"><label>Vía rápida: sostener (s)</label><input type="number" id="sPbFastSustain" min="0" max="60" value="' + (pb.fast_sustain_s ?? 2) + '"></div>' +
+      "</div>" +
       '<div class="checkrow"><input type="checkbox" id="sPbEco"' + (pb.eco ? " checked" : "") + "><span>Activar eficiencia (EcoQoS) mientras está regulado</span></div>" +
       '<div class="checkrow"><input type="checkbox" id="sPbSkipFg"' + (pb.skip_foreground ? " checked" : "") + "><span>No tocar el proceso en primer plano</span></div>" +
       '<div class="checkrow"><input type="checkbox" id="sPbSkipInt"' + (pb.skip_interactive ? " checked" : "") + "><span>No tocar apps con ventana visible (navegador, chat, IDE)</span></div>" +
@@ -604,6 +608,8 @@ function settingsModal() {
         enabled: el("sPbEnabled").checked,
         threshold: Number(el("sPbThreshold").value),
         sustain_s: Number(el("sPbSustain").value),
+        fast_threshold: Number(el("sPbFastThreshold").value),
+        fast_sustain_s: Number(el("sPbFastSustain").value),
         restore_below: Number(el("sPbRestoreBelow").value),
         restore_s: Number(el("sPbRestoreS").value),
         priority: el("sPbPriority").value,

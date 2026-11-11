@@ -18,8 +18,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, WS_EX_TOOLWINDOW,
 };
 
-const ACCESS: u32 = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION | PROCESS_SET_QUOTA;
-
 #[repr(C)]
 struct PowerThrottlingState {
     version: u32,
