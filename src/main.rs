@@ -23,6 +23,10 @@ fn main() {
         "power" => cli_power(&args, port),
         "set" => cli_set(&args, port),
         "stop" => post(port, "/api/shutdown", json!({})).map(|_| println!("Domador detenido")),
+        "version" | "--version" | "-V" => {
+            println!("Domador {}", model::VERSION);
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
