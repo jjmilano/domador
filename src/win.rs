@@ -71,6 +71,21 @@ pub fn priority_class_from_key(key: &str) -> Option<u32> {
     })
 }
 
+/// Orden lógico de las clases de prioridad. Las constantes de Windows no
+/// están ordenadas numéricamente (Below Normal = 16384, High = 128), así que
+/// comparar los valores crudos da resultados incorrectos.
+pub fn priority_rank(class: u32) -> u8 {
+    match class {
+        IDLE_PRIORITY_CLASS => 0,
+        BELOW_NORMAL_PRIORITY_CLASS => 1,
+        NORMAL_PRIORITY_CLASS => 2,
+        ABOVE_NORMAL_PRIORITY_CLASS => 3,
+        HIGH_PRIORITY_CLASS => 4,
+        REALTIME_PRIORITY_CLASS => 5,
+        _ => 2,
+    }
+}
+
 pub fn priority_key(class: u32) -> Option<String> {
     Some(
         match class {

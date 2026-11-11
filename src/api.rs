@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -37,6 +38,8 @@ pub fn serve(engine: Shared, port: u16) -> Result<u16, String> {
 
     Ok(actual)
 }
+
+const MAX_BODY: usize = 64 * 1024;
 
 fn handle(mut request: Request, engine: Shared) {
     let method = request.method().clone();
@@ -109,8 +112,23 @@ fn handle(mut request: Request, engine: Shared) {
         );
     }
 
+    if request
+        .body_length()
+        .map(|length| length > MAX_BODY)
+        .unwrap_or(false)
+    {
+        return reply(
+            request,
+            413,
+            &json!({"ok": false, "error": "cuerpo demasiado grande"}),
+        );
+    }
+
     let mut body = String::new();
-    let _ = request.as_reader().read_to_string(&mut body);
+    let _ = request
+        .as_reader()
+        .take(MAX_BODY as u64)
+        .read_to_string(&mut body);
     let payload: Value = if body.trim().is_empty() {
         json!({})
     } else {

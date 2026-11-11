@@ -354,6 +354,7 @@ fn base(port: u16) -> String {
 
 fn get(port: u16, path: &str) -> Result<Value, String> {
     let response = ureq::get(&format!("{}{path}", base(port)))
+        .timeout(std::time::Duration::from_secs(5))
         .call()
         .map_err(|err| format!("no pude conectar con Domador en el puerto {port}: {err}"))?;
     response
@@ -363,6 +364,7 @@ fn get(port: u16, path: &str) -> Result<Value, String> {
 
 fn post(port: u16, path: &str, body: Value) -> Result<Value, String> {
     let result = ureq::post(&format!("{}{path}", base(port)))
+        .timeout(std::time::Duration::from_secs(5))
         .set("X-Domador", "1")
         .set("Content-Type", "application/json")
         .send_json(body);

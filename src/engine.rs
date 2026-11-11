@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+use windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS;
 
 use crate::config;
 use crate::model::*;
@@ -684,6 +685,9 @@ impl Engine {
     pub fn trim(&mut self, pid: u32) -> Result<u64, String> {
         let before = self.sampler.memory_of(pid).unwrap_or(0);
         win::trim_working_set(pid)?;
+        // El working set cambia con el trim; refrescar una vez para medir el
+        // después con datos nuevos y no reportar siempre 0.
+        let _ = self.sampler.refresh();
         let after = self.sampler.memory_of(pid).unwrap_or(0);
         let freed = before.saturating_sub(after);
         self.log(
@@ -876,7 +880,7 @@ impl Engine {
                 continue;
             }
             let Some(nice) = row.nice else { continue };
-            if nice <= win::priority_class_from_key("below_normal").unwrap() {
+            if win::priority_rank(nice) <= win::priority_rank(BELOW_NORMAL_PRIORITY_CLASS) {
                 continue;
             }
             if row.cpu < 1.0 {
@@ -922,7 +926,7 @@ impl Engine {
         let Some(original) = win::get_priority_class(pid) else {
             return;
         };
-        if original <= win::priority_class_from_key("below_normal").unwrap() {
+        if win::priority_rank(original) <= win::priority_rank(BELOW_NORMAL_PRIORITY_CLASS) {
             return;
         }
         let target_key = if cfg.priority == "idle" {
@@ -1048,7 +1052,7 @@ impl Engine {
             return;
         }
         let Some(nice) = row.nice else { return };
-        if nice >= target {
+        if win::priority_rank(nice) >= win::priority_rank(target) {
             return;
         }
         if self.fg_boost.is_some() {
@@ -1400,7 +1404,7 @@ impl Engine {
             let mut changed = false;
             if let Some(class) = win::priority_class_from_key(priority) {
                 if win::get_priority_class(pid)
-                    .map(|c| c < class)
+                    .map(|c| win::priority_rank(c) < win::priority_rank(class))
                     .unwrap_or(true)
                     && self.set_priority(pid, priority).is_ok()
                 {
