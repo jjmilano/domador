@@ -16,7 +16,7 @@ Domador hace lo mismo (y algunas cosas más) con el código a la vista: reglas p
 
 ## Estado
 
-v0.4, usable y probado en Windows 11. El motor Rust, la UI web, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API y handshake MCP (4/4). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
+v0.4, usable y probado en Windows 11. El motor Rust, la UI web, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP y snapshot NT (5/5). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
 
 Lo que falta está en el roadmap: icono de bandeja, servicio elevado para procesos protegidos y CPU sets. Nada de eso impide usarlo hoy.
 
