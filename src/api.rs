@@ -573,6 +573,31 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, ApiError
             Ok(json!({"ok": true, "profile": profile}))
         }
         "/api/shutdown" => {
+            // `close_all`: para actualizar sin pasos manuales. El motor corre
+            // elevado, así que puede cerrar la UI y la bandeja elevadas (un
+            // proceso sin admin no puede).
+            let close_all = body
+                .get("close_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if close_all {
+                let own = std::process::id();
+                let targets: Vec<u32> = lock(engine)
+                    .rows
+                    .iter()
+                    .filter(|r| r.pid != own)
+                    .filter(|r| {
+                        matches!(
+                            r.name.to_ascii_lowercase().as_str(),
+                            "domador-ui.exe" | "domador-tray.exe"
+                        )
+                    })
+                    .map(|r| r.pid)
+                    .collect();
+                for pid in targets {
+                    let _ = crate::win::terminate_process(pid);
+                }
+            }
             lock(engine).shutdown();
             thread::spawn(|| {
                 thread::sleep(std::time::Duration::from_millis(150));
