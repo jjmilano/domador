@@ -415,11 +415,62 @@ td .select[data-prio="idle"], td .select[data-prio="below_normal"] { color: var(
 .toast.warn { border-color: #7d642b; color: #ffe4b0; }
 @keyframes slide { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
 
+/* ---------- salud ---------- */
+
 @media (max-width: 1240px) {
   .spark { display: none; }
   .cores { width: 96px; }
   .profile-state .since { display: none; }
 }
+
+.healthgrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 16px;
+  overflow: auto;
+  align-content: start;
+}
+.card {
+  min-width: 0;
+  background: linear-gradient(180deg, rgba(18, 27, 37, .95), rgba(12, 18, 25, .95));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .25);
+}
+.card h3 {
+  margin: 0 0 12px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--muted);
+}
+.card h3 .hint { text-transform: none; letter-spacing: 0; font-size: 10.5px; margin-left: 6px; }
+.card.wide { grid-column: 1 / -1; }
+.memgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 16px; }
+.kv { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; border-bottom: 1px solid rgba(29, 40, 52, .55); padding-bottom: 6px; }
+.kv span { color: var(--muted); font-size: 11.5px; }
+.kv b { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; }
+.kv b.hot { color: var(--danger); }
+.kv b.warm { color: var(--warn); }
+.healthtable { max-height: 300px; border: 1px solid var(--line); border-radius: 8px; }
+.healthtable table { width: 100%; border-collapse: collapse; }
+.healthtable th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.healthtable td, .healthtable th { padding: 7px 9px; border-bottom: 1px solid rgba(29, 40, 52, .5); }
+.healthtable .ppath { max-width: 520px; }
+.healthtable button { background: none; border: 1px solid var(--line2); color: var(--blue); border-radius: 6px; padding: 3px 7px; cursor: pointer; font-size: 10.5px; }
+.healthtable button:hover { border-color: var(--blue); }
+.runaway-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(29, 40, 52, .5); }
+.runaway-row b { display: block; font-size: 12px; }
+.runaway-row span { color: var(--muted); font-size: 10.5px; }
+.runaway-row button { background: rgba(242, 112, 112, .12); border: 1px solid rgba(242, 112, 112, .35); color: #ffb4b4; border-radius: 6px; padding: 4px 8px; cursor: pointer; font-size: 10.5px; }
+
+@media (max-width: 1100px) {
+  .healthgrid { grid-template-columns: 1fr; }
+  .card.wide { grid-column: auto; }
+}
+
 @media (max-width: 1080px) {
   .gauges .cores { display: none; }
   .input { width: 190px; }

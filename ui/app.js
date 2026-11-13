@@ -171,6 +171,7 @@ function renderHeader() {
   renderSpark();
   renderPlans();
   renderProfile();
+  renderHealth();
 }
 
 function renderCores() {
@@ -300,6 +301,7 @@ function procRow(p) {
       '<td class="center"><label class="mini"><input type="checkbox" class="eco"' + (p.eco ? " checked" : "") + "><span></span></label></td>" +
       '<td class="acts">' +
         '<button data-act="rule" title="Regla para este ejecutable">⚙</button>' +
+        '<button data-act="gpu" title="Forzar GPU dedicada para este ejecutable">🎮</button>' +
         '<button data-act="trim" title="Liberar RAM">💧</button>' +
         '<button data-act="restore" title="Restaurar valores originales">↺</button>' +
         '<button data-act="kill" title="Terminar proceso">✕</button>' +
@@ -363,6 +365,46 @@ function renderFooter() {
   el("footLeft").textContent = d.app.name + " " + d.app.version + " · " + d.app.ncpu + " núcleos · " + (d.app.admin ? "admin" : "sin admin");
   el("footLeft").title = d.app.config_path;
   el("footRight").textContent = "primer plano: " + (d.system.foreground_name || "—");
+}
+
+function renderHealth() {
+  const d = S.data;
+  const mem = d.system.mem || {};
+  const gb = (b) => ((b || 0) / 1073741824).toFixed(1) + " GB";
+  const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+  const commitPct = pct(mem.commit_used, mem.commit_limit);
+  el("memCards").innerHTML =
+    '<div class="kv"><span>Disponible</span><b>' + gb(mem.available) + "</b></div>" +
+    '<div class="kv"><span>Commit</span><b class="' + (commitPct >= 90 ? "hot" : commitPct >= 75 ? "warm" : "") + '">' + gb(mem.commit_used) + " / " + gb(mem.commit_limit) + "</b></div>" +
+    '<div class="kv"><span>Pool paginado</span><b>' + gb(mem.pool_paged) + "</b></div>" +
+    '<div class="kv"><span>Pool no paginado</span><b>' + gb(mem.pool_nonpaged) + "</b></div>" +
+    '<div class="kv"><span>Cache</span><b>' + gb(mem.cache) + "</b></div>" +
+    '<div class="kv"><span>Procesos / handles</span><b>' + (mem.processes || "—") + " / " + (mem.handles || "—") + "</b></div>";
+
+  const gpu = d.gpu || {};
+  el("gpuCard").innerHTML = gpu.available
+    ? '<div class="kv"><span>' + esc(gpu.name) + "</span><b>" + gpu.utilization.toFixed(0) + "%</b></div>" +
+      '<div class="kv"><span>VRAM</span><b>' + gb(gpu.memory_used) + " / " + gb(gpu.memory_total) + "</b></div>" +
+      '<div class="kv"><span>Temperatura</span><b>' + gpu.temperature.toFixed(0) + " °C</b></div>" +
+      '<div class="kv"><span>Potencia</span><b>' + (gpu.power ? gpu.power.toFixed(0) + " W" : "—") + "</b></div>" +
+      '<div class="kv"><span>Estado</span><b>' + esc(gpu.pstate) + " · driver " + esc(gpu.driver) + "</b></div>"
+    : '<div class="empty">nvidia-smi no disponible</div>';
+
+  const top = [...d.processes].sort((a, b) => (b.private || b.rss) - (a.private || a.rss)).slice(0, 12);
+  el("privateBody").innerHTML = top.map((p) =>
+    '<tr><td><div class="pname">' + esc(p.name) + '</div><div class="ppath">' + esc(p.exe || "—") + "</div></td>" +
+    '<td class="num">' + fmtMB(p.private || p.rss) + "</td>" +
+    '<td class="num">' + fmtMB(p.rss) + "</td>" +
+    '<td class="num">' + p.cpu.toFixed(1) + "%</td>" +
+    '<td class="acts"><button data-gpu-pid="' + p.pid + '" title="Forzar GPU dedicada para este ejecutable">GPU</button></td></tr>'
+  ).join("");
+
+  const runaways = d.runaways || [];
+  el("runawayList").innerHTML = runaways.length
+    ? runaways.map((r) =>
+        '<div class="runaway-row"><div><b>' + esc(r.name) + '</b><span>PID ' + r.pid + " · " + r.cpu.toFixed(1) + "% · " + r.minutes.toFixed(0) + ' min</span></div><button data-kill-pid="' + r.pid + '">Terminar</button></div>'
+      ).join("")
+    : '<div class="empty">Sin procesos colgados.</div>';
 }
 
 /* ---------- selección y lote ---------- */
@@ -555,6 +597,7 @@ function settingsModal() {
   ).join("");
   const trimPrio = '<option value="below_normal"' + (pb.priority === "below_normal" ? " selected" : "") + ">Bajo</option>" +
     '<option value="idle"' + (pb.priority === "idle" ? " selected" : "") + ">Idle</option>";
+  const runOpts = (v, label) => '<option value="' + v + '"' + (d.runaway.action === v ? " selected" : "") + ">" + label + "</option>";
 
   openModal({
     title: "Ajustes",
@@ -580,6 +623,14 @@ function settingsModal() {
       '<div class="checkrow"><input type="checkbox" id="sPbSkipInt"' + (pb.skip_interactive ? " checked" : "") + "><span>No tocar apps con ventana visible (navegador, chat, IDE)</span></div>" +
       '<div class="field" style="max-width:220px"><label>Cooldown tras restaurar (s)</label><input type="number" id="sPbCooldown" min="0" max="600" value="' + pb.cooldown_s + '"></div>' +
       '<div class="field"><label>Protegidos (uno por línea)</label><textarea id="sProtect">' + esc((pb.protect || []).join("\n")) + "</textarea></div>" +
+
+      '<div class="section">Watchdog de procesos colgados</div>' +
+      '<div class="checkrow"><input type="checkbox" id="sRunEnabled"' + (d.runaway.enabled ? " checked" : "") + "><span>Avisar cuando un proceso sin ventana queda clavado en CPU</span></div>" +
+      '<div class="grid3">' +
+        '<div class="field"><label>CPU sostenida (%)</label><input type="number" id="sRunCpu" min="1" max="100" value="' + d.runaway.cpu_pct + '"></div>' +
+        '<div class="field"><label>Durante (min)</label><input type="number" id="sRunMinutes" min="1" max="180" value="' + d.runaway.minutes + '"></div>' +
+        '<div class="field"><label>Acción</label><select id="sRunAction">' + runOpts("warn", "Avisar") + runOpts("kill", "Terminar") + "</select></div>" +
+      "</div>" +
 
       '<div class="section">SmartTrim</div>' +
       '<div class="checkrow"><input type="checkbox" id="sTrimEnabled"' + (trim.enabled ? " checked" : "") + "><span>Liberar RAM automáticamente cuando el sistema está al límite</span></div>" +
@@ -618,6 +669,12 @@ function settingsModal() {
         skip_interactive: el("sPbSkipInt").checked,
         cooldown_s: Number(el("sPbCooldown").value),
         protect: el("sProtect").value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean),
+      });
+      await api("/api/runaway", {
+        enabled: el("sRunEnabled").checked,
+        cpu_pct: Number(el("sRunCpu").value),
+        minutes: Number(el("sRunMinutes").value),
+        action: el("sRunAction").value,
       });
       await api("/api/settings/trim", {
         enabled: el("sTrimEnabled").checked,
@@ -827,8 +884,36 @@ function bind() {
         const rule = proc.rule_id ? S.data.rules.find((r) => r.id === proc.rule_id) : null;
         ruleModal(rule || null, proc);
       } else if (act === "trim") await doTrim(pid);
+      else if (act === "gpu") {
+        const res = await api("/api/gpu-preference", { pid, mode: "high" });
+        toast("GPU dedicada para " + res.exe.split("\\").pop(), "ok");
+      }
       else if (act === "restore") await doRestore(pid);
       else if (act === "kill") await doKill(pid, proc.name);
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  });
+
+  el("privateBody").addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("button[data-gpu-pid]");
+    if (!btn) return;
+    try {
+      const res = await api("/api/gpu-preference", { pid: Number(btn.dataset.gpuPid), mode: "high" });
+      toast("GPU dedicada para " + res.exe.split("\\").pop(), "ok");
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  });
+
+  el("runawayList").addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("button[data-kill-pid]");
+    if (!btn) return;
+    const pid = Number(btn.dataset.killPid);
+    const proc = S.data.processes.find((p) => p.pid === pid);
+    try {
+      await api("/api/kill", { pid });
+      toast("Terminado " + (proc ? proc.name : "PID " + pid), "ok");
     } catch (e) {
       toast(e.message, "err");
     }

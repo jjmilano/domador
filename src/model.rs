@@ -51,6 +51,7 @@ pub struct Config {
     pub ai: AiConfig,
     pub profile: ProfileState,
     pub ui: UiCfg,
+    pub runaway: Runaway,
 }
 
 impl Default for Config {
@@ -66,6 +67,7 @@ impl Default for Config {
             ai: AiConfig::default(),
             profile: ProfileState::default(),
             ui: UiCfg::default(),
+            runaway: Runaway::default(),
         }
     }
 }
@@ -261,6 +263,28 @@ impl Default for UiCfg {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct Runaway {
+    pub enabled: bool,
+    /// CPU sostenida en porcentaje de la máquina (16 hilos: 6.0 ≈ un núcleo).
+    pub cpu_pct: f64,
+    pub minutes: u32,
+    /// "warn" sólo avisa; "kill" termina el proceso.
+    pub action: String,
+}
+
+impl Default for Runaway {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cpu_pct: 6.0,
+            minutes: 5,
+            action: "warn".into(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ProcessRow {
     pub pid: u32,
@@ -270,6 +294,7 @@ pub struct ProcessRow {
     pub cpu: f64,
     pub hist: Vec<f32>,
     pub rss: u64,
+    pub private: u64,
     pub nice: Option<u32>,
     pub prio: Option<String>,
     pub prio_label: String,
@@ -320,9 +345,35 @@ pub struct SystemInfo {
     pub ram: f64,
     pub ram_used: u64,
     pub ram_total: u64,
+    pub mem: MemInfo,
     pub foreground: Option<u32>,
     pub foreground_name: Option<String>,
     pub last_tick: f64,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct MemInfo {
+    pub available: u64,
+    pub commit_used: u64,
+    pub commit_limit: u64,
+    pub pool_paged: u64,
+    pub pool_nonpaged: u64,
+    pub cache: u64,
+    pub handles: u32,
+    pub processes: u32,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct GpuInfo {
+    pub available: bool,
+    pub name: String,
+    pub driver: String,
+    pub utilization: f32,
+    pub memory_used: u64,
+    pub memory_total: u64,
+    pub temperature: f32,
+    pub power: f32,
+    pub pstate: String,
 }
 
 impl Default for SystemInfo {
@@ -333,6 +384,7 @@ impl Default for SystemInfo {
             ram: 0.0,
             ram_used: 0,
             ram_total: 0,
+            mem: MemInfo::default(),
             foreground: None,
             foreground_name: None,
             last_tick: 0.0,
@@ -381,6 +433,15 @@ pub struct PowerInfo {
     pub ac_line: bool,
 }
 
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct RunawayInfo {
+    pub pid: u32,
+    pub name: String,
+    pub cpu: f64,
+    pub minutes: f64,
+    pub action: String,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Snapshot {
     pub app: AppInfo,
@@ -395,6 +456,9 @@ pub struct Snapshot {
     pub log: Vec<LogEntry>,
     pub counts: Counts,
     pub profile: ProfileState,
+    pub gpu: GpuInfo,
+    pub runaways: Vec<RunawayInfo>,
+    pub runaway: Runaway,
 }
 
 #[derive(Serialize, Clone, Debug)]

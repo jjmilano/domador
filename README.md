@@ -4,7 +4,7 @@ Control de procesos y rendimiento para Windows, escrito en Rust. Una alternativa
 
 Un solo `.exe`. Sin dependencias en tiempo de ejecución. Sin llamadas a casa.
 
-**Descargar:** [Domador v0.4.2](https://github.com/jjmilano/domador/releases/tag/v0.4.2) · Windows 10/11 x64.
+**Descargar:** [Domador v0.5.0](https://github.com/jjmilano/domador/releases/tag/v0.5.0) · Windows 10/11 x64.
 
 ![UI de Domador](docs/screenshot.png)
 
@@ -16,7 +16,7 @@ Domador hace lo mismo (y algunas cosas más) con el código a la vista: reglas p
 
 ## Estado
 
-v0.4, usable y probado en Windows 11. El motor Rust, la UI web, el servidor de bandeja, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP, snapshot NT y parsing de `powercfg` (6/6). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
+v0.5, usable y probado en Windows 11. El motor Rust, la UI web, el servidor de bandeja, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP, snapshot NT y parsing de `powercfg` (6/6). El binario release pesa **2,1 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
 
 Lo que falta está en el roadmap: servicio elevado para procesos protegidos y CPU sets. Nada de eso impide usarlo hoy.
 
@@ -32,6 +32,14 @@ El corazón del proyecto. Cada tanto mira el consumo de CPU por proceso y, cuand
 - **Cooldown** (`cooldown_s`): después de restaurar un proceso no lo vuelve a tocar por un rato. Evita el ping-pong de prioridades que castiga el rendimiento más de lo que ayuda.
 - **Protección de apps interactivas**: `skip_foreground` no toca la ventana en primer plano y `skip_interactive` saltea cualquier proceso con ventana visible (navegador, chat, IDE). La lista `protect` es manual y tiene la última palabra.
 - Todo lo que toca queda registrado y se puede restaurar a mano.
+
+### Diagnóstico de memoria, GPU y procesos colgados
+
+La pestaña **Salud** muestra lo que el Task Manager esconde: commit real contra el límite, pool paginado y no paginado del kernel, cache, y los procesos ordenados por **memoria privada** (no working set). Así aparecen los `hex.exe` que ocupan 1,5 GB con 27 MB de working set.
+
+El **watchdog de colgados** detecta un proceso sin ventana que lleva N minutos por encima de un umbral de CPU y lo registra; opcionalmente lo termina. Es lo que habría cazado el `find.exe` que estuvo 5 horas comiéndose un núcleo.
+
+La tarjeta **GPU** consulta `nvidia-smi` (uso, VRAM, temperatura, potencia, P-state) y el botón 🎮 de cada proceso escribe la preferencia de **GPU dedicada** en Windows para ese ejecutable. No agrega VRAM: sirve para que el juego no quede en la iGPU y para ver cuánta VRAM se están comiendo los WebViews.
 
 ### Reglas por ejecutable
 
@@ -167,6 +175,8 @@ Todos son `POST` con body JSON salvo los `GET`. Respuesta: `{"ok": true}` o `{"o
 | `POST /api/trim` | `{"pid":1234}` | Libera el working set |
 | `POST /api/restore` | `{"pid":1234}` | Restaura los valores originales |
 | `POST /api/kill` | `{"pid":1234}` | Termina el proceso |
+| `POST /api/gpu-preference` | `{"pid":1234,"mode":"high"}` | Fuerza GPU dedicada (`high`) o automática (`default`) para el ejecutable |
+| `POST /api/runaway` | `{"enabled":true,"cpu_pct":6,"minutes":5,"action":"warn"}` | Ajusta el watchdog de procesos colgados |
 | `POST /api/rules` | `{"op":"create","rule":{...}}` | `create`, `update`, `delete`, `toggle`, `apply` |
 | `POST /api/probalance` | `{"enabled":true,...}` | Ajusta ProBalance en caliente |
 
@@ -189,7 +199,7 @@ Medición real en esta notebook (Legion, 16 hilos lógicos, Windows 11), misma s
 | Cambios de prioridad en 42 s (2 hogs) | 8 (4 por proceso: 2 bajadas + 2 restauraciones) | 4 (2 por proceso: 1 bajada + 1 restauración) |
 | Primer throttle | 0,1 s | 8,8 s |
 | Latencia de acciones p50 / p95 | sin API ni CLI documentada | 2,37 / 25,42 ms |
-| Distribución | instalador + servicio | un `.exe` de 2,02 MB |
+| Distribución | instalador + servicio | un `.exe` de 2,06 MB |
 | Churn real (30 min de su log) | 35 bajadas sobre 5 procesos, incluidos Chrome, WebView y ChatGPT | — |
 
 **Lectura honesta:** Lasso gana en reacción inicial; Domador gana en huella (17,3 MB y 0,12% contra 20 MB y 0,19%), en estabilidad (la mitad de cambios de prioridad), en tamaño de distribución, en automatización (API/MCP) y en no necesitar servicio. La UI de Domador es una pestaña del Edge que ya está abierto, así que su costo no es comparable con una GUI nativa; el motor es el número que importa cuando jugás.

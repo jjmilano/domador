@@ -108,6 +108,8 @@ pub struct ProcEntry {
     pub cpu_ticks: u64,
     /// `WorkingSetSize` en bytes.
     pub rss: u64,
+    /// `PrivatePageCount` (páginas) convertido a bytes.
+    pub private_bytes: u64,
     pub threads: u32,
     pub handles: u32,
     pub base_priority: i32,
@@ -234,6 +236,9 @@ impl ProcessSnapshot {
                 cpu_ticks: (raw.user_time.max(0) as u64)
                     .saturating_add(raw.kernel_time.max(0) as u64),
                 rss: raw.working_set_size as u64,
+                // `PagefileUsage` es el commit privado del proceso (lo mismo
+                // que psutil llama `private`), en bytes.
+                private_bytes: raw.pagefile_usage as u64,
                 threads: raw.number_of_threads,
                 handles: raw.handle_count,
                 base_priority: raw.base_priority,

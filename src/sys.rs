@@ -9,8 +9,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use sysinfo::System;
+use windows_sys::Win32::System::ProcessStatus::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
 
-use crate::model::ProcessRow;
+use crate::model::{MemInfo, ProcessRow};
 use crate::nt::{ProcEntry, ProcessSnapshot};
 
 /// Muestras de CPU que se guardan por proceso (historial del UI).
@@ -108,6 +109,7 @@ impl Sampler {
                 cpu: (cpu as f64 * 10.0).round() / 10.0,
                 hist: hist.iter().copied().collect(),
                 rss: entry.rss,
+                private: entry.private_bytes,
                 nice: None,
                 prio: None,
                 prio_label: "—".into(),
@@ -159,5 +161,33 @@ impl Sampler {
 
     pub fn memory_of(&self, pid: u32) -> Option<u64> {
         self.rss.get(&pid).copied()
+    }
+}
+
+/// Composición de memoria del sistema vía `GetPerformanceInfo`: commit,
+/// pools del kernel y cache. Es lo que permite ver la memoria que el
+/// working set por proceso no muestra.
+pub fn mem_info() -> MemInfo {
+    let mut info: PERFORMANCE_INFORMATION = unsafe { std::mem::zeroed() };
+    info.cb = std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32;
+    let ok = unsafe {
+        GetPerformanceInfo(
+            &mut info,
+            std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32,
+        )
+    };
+    if ok == 0 {
+        return MemInfo::default();
+    }
+    let page = info.PageSize as u64;
+    MemInfo {
+        available: info.PhysicalAvailable as u64 * page,
+        commit_used: info.CommitTotal as u64 * page,
+        commit_limit: info.CommitLimit as u64 * page,
+        pool_paged: info.KernelPaged as u64 * page,
+        pool_nonpaged: info.KernelNonpaged as u64 * page,
+        cache: info.SystemCache as u64 * page,
+        handles: info.HandleCount,
+        processes: info.ProcessCount,
     }
 }

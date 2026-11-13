@@ -206,6 +206,18 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, String> 
             let freed = lock(engine).trim(pid)?;
             Ok(json!({"ok": true, "freed": freed}))
         }
+        "/api/gpu-preference" => {
+            let pid = pid_of(body)?;
+            let mode = str_of(body, "mode")?;
+            let exe = crate::win::process_exe(pid)
+                .ok_or_else(|| "no pude resolver el ejecutable".to_string())?;
+            crate::gpu::set_preference(&exe, &mode)?;
+            Ok(json!({"ok": true, "exe": exe, "mode": mode}))
+        }
+        "/api/runaway" => {
+            let cfg = lock(engine).set_runaway(body)?;
+            Ok(json!({"ok": true, "runaway": cfg}))
+        }
         "/api/trim-all" => {
             let (freed, count) = lock(engine).trim_all();
             Ok(json!({"ok": true, "freed": freed, "count": count}))

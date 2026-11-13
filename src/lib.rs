@@ -1,6 +1,7 @@
 pub mod api;
 pub mod config;
 pub mod engine;
+pub mod gpu;
 pub mod mcp;
 pub mod model;
 pub mod nt;

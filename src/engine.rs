@@ -9,7 +9,7 @@ use windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS;
 use crate::config;
 use crate::model::*;
 use crate::power;
-use crate::sys::Sampler;
+use crate::sys::{mem_info, Sampler};
 use crate::win;
 
 type Key = (u32, i64);
@@ -112,10 +112,15 @@ pub struct Engine {
     samples: HashMap<Key, VecDeque<f64>>,
     rules_done: KeySet,
     visible: HashSet<u32>,
+    runaway_since: HashMap<Key, Instant>,
+    runaway_warned: HashSet<Key>,
+    runaways: Vec<RunawayInfo>,
     pub plans: Vec<PowerPlan>,
     pub active_plan: Option<String>,
     pub profile: ProfileState,
     profile_applied: Vec<u32>,
+    gpu: GpuInfo,
+    gpu_at: Instant,
     started: Instant,
     tick_ms: VecDeque<f64>,
     last_tick_ms: f64,
@@ -154,10 +159,15 @@ impl Engine {
             samples: HashMap::new(),
             rules_done: HashSet::new(),
             visible: HashSet::new(),
+            runaway_since: HashMap::new(),
+            runaway_warned: HashSet::new(),
+            runaways: Vec::new(),
             plans: Vec::new(),
             active_plan: None,
             profile: ProfileState::default(),
             profile_applied: Vec::new(),
+            gpu: GpuInfo::default(),
+            gpu_at: Instant::now() - Duration::from_secs(60),
             started: Instant::now(),
             tick_ms: VecDeque::with_capacity(180),
             last_tick_ms: 0.0,
@@ -240,9 +250,10 @@ impl Engine {
         self.system = SystemInfo {
             cpu,
             percpu,
-            ram,
+            ram: ram,
             ram_used: used,
             ram_total: total,
+            mem: mem_info(),
             foreground,
             foreground_name,
             last_tick: now_epoch(),
@@ -267,6 +278,7 @@ impl Engine {
         self.pb_step();
         self.fg_step();
         self.watchdog_step();
+        self.runaway_step();
         self.trim_step();
         self.power_step();
 
@@ -953,6 +965,12 @@ impl Engine {
             }
         }
         self.meta.remove(&key);
+        // Empezar a contar la calma desde el throttle, no desde las muestras
+        // que había antes: si no, se restaura demasiado rápido y vuelve a
+        // oscilar.
+        if let Some(queue) = self.samples.get_mut(&key) {
+            queue.clear();
+        }
         self.pb.insert(
             key,
             PbRecord {
@@ -1103,6 +1121,83 @@ impl Engine {
     }
 
     // ---------------------------------------------------------------- watchdog
+
+    fn runaway_step(&mut self) {
+        let cfg = self.config.runaway.clone();
+        if !cfg.enabled {
+            self.runaway_since.clear();
+            self.runaway_warned.clear();
+            self.runaways.clear();
+            return;
+        }
+        let alive: KeySet = self.rows.iter().map(|r| r.key()).collect();
+        self.runaway_since.retain(|k, _| alive.contains(k));
+        self.runaway_warned.retain(|k| alive.contains(k));
+        self.runaways.clear();
+
+        let own = std::process::id();
+        let foreground = self.system.foreground;
+        let visible = if self.visible.is_empty() {
+            win::visible_window_pids()
+        } else {
+            self.visible.clone()
+        };
+        let rows: Vec<(Key, u32, String, f64, bool)> = self
+            .rows
+            .iter()
+            .map(|row| (row.key(), row.pid, row.name.clone(), row.cpu, row.protected))
+            .collect();
+
+        for (key, pid, name, cpu, protected) in rows {
+            if pid == own
+                || pid <= 4
+                || protected
+                || Some(pid) == foreground
+                || visible.contains(&pid)
+            {
+                self.runaway_since.remove(&key);
+                continue;
+            }
+            if cpu < cfg.cpu_pct {
+                self.runaway_since.remove(&key);
+                self.runaway_warned.remove(&key);
+                continue;
+            }
+            let since = *self.runaway_since.entry(key).or_insert_with(Instant::now);
+            let minutes = since.elapsed().as_secs_f64() / 60.0;
+            if minutes < cfg.minutes as f64 {
+                continue;
+            }
+            self.runaways.push(RunawayInfo {
+                pid,
+                name: name.clone(),
+                cpu,
+                minutes,
+                action: cfg.action.clone(),
+            });
+            if !self.runaway_warned.insert(key) {
+                continue;
+            }
+            self.log(
+                "warn",
+                format!(
+                    "proceso colgado: {name} (PID {pid}) lleva {minutes:.0} min con {cpu:.1}% de CPU"
+                ),
+            );
+            if cfg.action == "kill" {
+                match win::terminate_process(pid) {
+                    Ok(()) => {
+                        self.log("warn", format!("watchdog terminó {name} (PID {pid})"));
+                        self.runaway_since.remove(&key);
+                    }
+                    Err(err) => self.log(
+                        "warn",
+                        format!("watchdog no pudo terminar {name} (PID {pid}): {err}"),
+                    ),
+                }
+            }
+        }
+    }
 
     fn watchdog_step(&mut self) {
         let rules: Vec<Rule> = self
@@ -1499,6 +1594,27 @@ impl Engine {
         Ok(result)
     }
 
+    pub fn set_runaway(&mut self, patch: &Value) -> Result<Runaway, String> {
+        let cfg = &mut self.config.runaway;
+        if let Some(v) = patch.get("enabled").and_then(|v| v.as_bool()) {
+            cfg.enabled = v;
+        }
+        if let Some(v) = patch.get("cpu_pct").and_then(|v| v.as_f64()) {
+            cfg.cpu_pct = v.clamp(1.0, 100.0);
+        }
+        if let Some(v) = patch.get("minutes").and_then(|v| v.as_u64()) {
+            cfg.minutes = (v as u32).clamp(1, 180);
+        }
+        if let Some(v) = patch.get("action").and_then(|v| v.as_str()) {
+            if v == "warn" || v == "kill" {
+                cfg.action = v.into();
+            }
+        }
+        let result = cfg.clone();
+        self.save();
+        Ok(result)
+    }
+
     pub fn set_trim(&mut self, patch: &Value) -> Result<Trim, String> {
         let cfg = &mut self.config.trim;
         if let Some(v) = patch.get("enabled").and_then(|v| v.as_bool()) {
@@ -1641,6 +1757,10 @@ impl Engine {
             .and_then(|guid| self.plans.iter().find(|p| &p.guid == guid))
             .map(|p| p.name.clone())
             .unwrap_or_default();
+        if self.gpu_at.elapsed().as_secs_f64() > 5.0 {
+            self.gpu = crate::gpu::query();
+            self.gpu_at = Instant::now();
+        }
         let tick_ms = self.tick_stats();
         Snapshot {
             app: AppInfo {
@@ -1680,6 +1800,9 @@ impl Engine {
                 applied: self.applied.len(),
             },
             profile: self.profile.clone(),
+            gpu: self.gpu.clone(),
+            runaways: self.runaways.clone(),
+            runaway: self.config.runaway.clone(),
         }
     }
 
