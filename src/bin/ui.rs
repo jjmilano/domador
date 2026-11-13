@@ -401,36 +401,22 @@ impl DomadorUi {
                             .color(C_MUTED),
                     );
                     ui.add_space(4.0);
-                    profile_chip(
-                        ui,
-                        &active,
-                        "full_power",
-                        "⚡ Full Power",
-                        C_ACCENT,
-                        || self.profile("full_power"),
-                    );
-                    profile_chip(ui, &active, "gaming", "🎮 Juego", C_CORAL, || {
+                    profile_chip(ui, &active, "full_power", "Full Power", C_ACCENT, || {
+                        self.profile("full_power")
+                    });
+                    profile_chip(ui, &active, "gaming", "Juego", C_CORAL, || {
                         self.profile("gaming")
                     });
                     profile_chip(
                         ui,
                         &active,
                         "ai",
-                        "🤖 IA",
+                        "IA",
                         egui::Color32::from_rgb(170, 160, 240),
                         || self.profile("ai"),
                     );
-                    profile_chip(ui, &active, "balanced", "⚖ Equilibrado", C_GREEN, || {
+                    profile_chip(ui, &active, "balanced", "Equilibrado", C_GREEN, || {
                         self.profile("balanced")
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(profile) = self.state().and_then(|s| s.get("profile").cloned())
-                        {
-                            let plan = profile.get("plan").and_then(|v| v.as_str()).unwrap_or("");
-                            if !plan.is_empty() {
-                                ui.label(egui::RichText::new(plan).size(10.0).color(C_MUTED));
-                            }
-                        }
                     });
                 });
             });
@@ -501,7 +487,7 @@ impl DomadorUi {
                     if runaways > 0 {
                         ui.add_space(12.0);
                         ui.label(
-                            egui::RichText::new(format!("⚠ {runaways} colgado(s)"))
+                            egui::RichText::new(format!("{runaways} colgado(s)"))
                                 .size(11.0)
                                 .color(C_CORAL),
                         );
@@ -526,8 +512,16 @@ impl DomadorUi {
             )
             .show(ctx, |ui| match self.tab {
                 Tab::Processes => self.processes(ui),
-                Tab::Health => self.health(ui),
-                Tab::Settings => self.settings(ui),
+                Tab::Health => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.health(ui));
+                }
+                Tab::Settings => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.settings(ui));
+                }
             });
     }
 
@@ -755,7 +749,7 @@ impl DomadorUi {
         ui.horizontal(|ui| {
             ui.heading(egui::RichText::new("Salud").size(20.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("🧹 Aliviar memoria de fondo").clicked() {
+                if ui.button("Aliviar memoria de fondo").clicked() {
                     self.action("/api/trim-idle", json!({}), "Liberando memoria de fondo");
                 }
             });
@@ -854,41 +848,24 @@ impl DomadorUi {
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
                 health_card(ui, &format!("GPU · {name}"), |ui| {
-                    ui.horizontal(|ui| {
-                        health_row(ui, "Uso", &format!("{util:.0}%"), C_ACCENT);
-                        ui.add_space(18.0);
-                        health_row(
-                            ui,
-                            "VRAM",
-                            &format!("{:.1}/{:.1} GB", used as f64 / GB, total as f64 / GB),
-                            C_TEXT,
-                        );
-                        ui.add_space(18.0);
-                        health_row(
-                            ui,
-                            "Temp",
-                            &format!("{temp:.0} °C"),
-                            if temp > 80.0 { C_CORAL } else { C_GREEN },
-                        );
-                    });
+                    health_row(ui, "Uso", &format!("{util:.0}%"), C_ACCENT);
+                    health_row(
+                        ui,
+                        "VRAM",
+                        &format!("{:.1} / {:.1} GB", used as f64 / GB, total as f64 / GB),
+                        C_TEXT,
+                    );
+                    health_row(
+                        ui,
+                        "Temperatura",
+                        &format!("{temp:.0} °C"),
+                        if temp > 80.0 { C_CORAL } else { C_GREEN },
+                    );
                 });
             }
         }
 
         ui.add_space(12.0);
-        ui.label(
-            egui::RichText::new("Top por memoria privada")
-                .strong()
-                .size(12.0),
-        );
-        ui.label(
-            egui::RichText::new(
-                "Es la memoria que el working set no muestra; los WebView suelen esconderse acá.",
-            )
-            .size(9.5)
-            .color(C_MUTED),
-        );
-        ui.add_space(4.0);
         let mut rows: Vec<&Value> = state
             .get("processes")
             .and_then(|v| v.as_array())
@@ -899,86 +876,201 @@ impl DomadorUi {
             let bv = b.get("private").and_then(|v| v.as_u64()).unwrap_or(0);
             bv.cmp(&av)
         });
-        for row in rows.iter().take(10) {
-            let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            let private = row.get("private").and_then(|v| v.as_u64()).unwrap_or(0);
-            let rss = row.get("rss").and_then(|v| v.as_u64()).unwrap_or(0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("{name:.30}")).size(11.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{:.2} GB priv · {:.2} GB rss",
-                            private as f64 / GB,
-                            rss as f64 / GB
-                        ))
-                        .size(10.0)
-                        .monospace()
-                        .color(C_MUTED),
-                    );
+        health_card(ui, "TOP POR MEMORIA PRIVADA", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Es la memoria que el working set no muestra; los WebView suelen esconderse acá.",
+                )
+                .size(9.5)
+                .color(C_MUTED),
+            );
+            ui.add_space(5.0);
+            egui::Grid::new("private-grid")
+                .num_columns(3)
+                .spacing([18.0, 5.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("PROCESO").size(9.0).color(C_MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new("PRIVADA").size(9.0).color(C_MUTED));
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new("WORKING SET").size(9.0).color(C_MUTED));
+                    });
+                    ui.end_row();
+                    for row in rows.iter().take(10) {
+                        let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let private = row.get("private").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let rss = row.get("rss").and_then(|v| v.as_u64()).unwrap_or(0);
+                        ui.label(egui::RichText::new(name).size(11.0).color(C_TEXT));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{:.2} GB", private as f64 / GB))
+                                    .size(11.0)
+                                    .monospace()
+                                    .strong()
+                                    .color(if private as f64 / GB > 1.0 {
+                                        C_CORAL
+                                    } else {
+                                        C_TEXT
+                                    }),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{:.2} GB", rss as f64 / GB))
+                                    .size(10.5)
+                                    .monospace()
+                                    .color(C_MUTED),
+                            );
+                        });
+                        ui.end_row();
+                    }
                 });
-            });
-        }
+        });
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
         ui.heading(egui::RichText::new("Ajustes").size(20.0));
-        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Rendimiento, permisos y ubicación del motor.")
+                .size(10.5)
+                .color(C_MUTED),
+        );
+        ui.add_space(10.0);
         let state = self.state();
         let enabled = state
             .as_ref()
             .and_then(|s| s.pointer("/probalance/enabled"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let mut on = enabled;
-        if ui.checkbox(&mut on, "ProBalanza").changed() {
-            self.action(
-                "/api/probalance",
-                json!({"enabled": on}),
-                "Guardando ProBalanza",
-            );
-        }
-        ui.label(
-            egui::RichText::new(
-                "Baja la prioridad de procesos que se comen la CPU y la restaura cuando se calman.",
-            )
-            .size(10.0)
-            .color(egui::Color32::from_rgb(110, 130, 145)),
-        );
-        ui.add_space(14.0);
         let admin = state
             .as_ref()
             .and_then(|s| s.pointer("/app/admin"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        ui.label(
-            egui::RichText::new(if admin {
-                "Corriendo con privilegios de administrador"
-            } else {
-                "Sin administrador: algunos procesos del sistema rechazan cambios"
-            })
-            .size(11.0),
-        );
-        if !admin && ui.button("Reiniciar como administrador").clicked() {
-            self.relaunch_admin();
-        }
-        if admin && ui.button("Arrancar siempre como admin").clicked() {
-            self.action("/api/admin-task", json!({}), "Creando tarea de inicio");
-        }
-        ui.add_space(18.0);
-        ui.label(egui::RichText::new("Motor").strong());
-        if let Some(path) = state
-            .as_ref()
-            .and_then(|s| s.pointer("/app/config_path"))
-            .and_then(|v| v.as_str())
-        {
-            ui.label(
-                egui::RichText::new(path)
-                    .monospace()
-                    .size(9.5)
-                    .color(egui::Color32::from_rgb(105, 125, 140)),
+        let mut toggle_pb = false;
+
+        ui.columns(2, |cols| {
+            settings_card(&mut cols[0], "RENDIMIENTO", |ui| {
+                ui.label(egui::RichText::new("ProBalanza").size(13.0).strong());
+                ui.label(
+                    egui::RichText::new("Baja la prioridad de los procesos que se comen la CPU y la restaura cuando se calman.")
+                        .size(10.0)
+                        .color(C_MUTED),
+                );
+                ui.add_space(7.0);
+                let text = if enabled { "Activado" } else { "Desactivado" };
+                let color = if enabled { C_ACCENT } else { C_MUTED };
+                if ui
+                    .add_sized(
+                        [132.0, 28.0],
+                        egui::Button::new(
+                            egui::RichText::new(text).size(11.5).strong().color(if enabled {
+                                egui::Color32::from_rgb(38, 25, 14)
+                            } else {
+                                C_TEXT
+                            }),
+                        )
+                        .fill(if enabled { color } else { C_PANEL })
+                        .stroke(egui::Stroke::new(1.0, C_BORDER)),
+                    )
+                    .clicked()
+                {
+                    toggle_pb = true;
+                }
+            });
+
+            settings_card(&mut cols[1], "ADMINISTRADOR", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Estado").size(10.5).color(C_MUTED));
+                    let (bg, fg, text) = if admin {
+                        (egui::Color32::from_rgb(24, 50, 35), C_GREEN, "ADMIN")
+                    } else {
+                        (egui::Color32::from_rgb(52, 37, 22), C_ACCENT, "SIN ADMIN")
+                    };
+                    egui::Frame::none()
+                        .fill(bg)
+                        .corner_radius(5.0)
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(text).size(9.5).strong().color(fg));
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(if admin {
+                        "Prioridades sobre procesos del sistema, planes y tareas elevadas."
+                    } else {
+                        "Algunos procesos del sistema van a rechazar cambios."
+                    })
+                    .size(10.0)
+                    .color(C_MUTED),
+                );
+                ui.add_space(7.0);
+                if !admin {
+                    if ui.button("Reiniciar como administrador").clicked() {
+                        self.relaunch_admin();
+                    }
+                } else if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Hacer permanente")
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(38, 25, 14)),
+                        )
+                        .fill(C_ACCENT),
+                    )
+                    .on_hover_text("Crea la tarea de inicio elevada (UAC una vez)")
+                    .clicked()
+                {
+                    self.action("/api/admin-task", json!({}), "Creando tarea de inicio");
+                }
+            });
+        });
+        if toggle_pb {
+            self.action(
+                "/api/probalance",
+                json!({"enabled": !enabled}),
+                "Guardando ProBalanza",
             );
         }
+
+        ui.add_space(10.0);
+        settings_card(ui, "MOTOR", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Configuración")
+                        .size(10.5)
+                        .color(C_MUTED),
+                );
+                if let Some(path) = state
+                    .as_ref()
+                    .and_then(|s| s.pointer("/app/config_path"))
+                    .and_then(|v| v.as_str())
+                {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(path)
+                                .monospace()
+                                .size(9.5)
+                                .color(C_MUTED),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+            if let Some(version) = state
+                .as_ref()
+                .and_then(|s| s.pointer("/app/version"))
+                .and_then(|v| v.as_str())
+            {
+                ui.label(
+                    egui::RichText::new(format!("Domador {version} · 127.0.0.1:8787"))
+                        .size(9.5)
+                        .color(C_MUTED),
+                );
+            }
+        });
     }
 
     fn kill_dialog(&mut self, ctx: &egui::Context) {
@@ -1137,6 +1229,19 @@ fn health_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui))
         });
 }
 
+fn settings_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::none()
+        .fill(C_CARD)
+        .corner_radius(10.0)
+        .stroke(egui::Stroke::new(1.0, C_BORDER))
+        .inner_margin(egui::Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(title).size(9.5).strong().color(C_MUTED));
+            ui.add_space(7.0);
+            body(ui);
+        });
+}
+
 fn health_row(ui: &mut egui::Ui, key: &str, value: &str, color: egui::Color32) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(key).size(10.5).color(C_MUTED));
@@ -1192,7 +1297,8 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Domador")
         .with_inner_size([1440.0, 900.0])
-        .with_min_inner_size([1080.0, 700.0]);
+        .with_min_inner_size([1080.0, 700.0])
+        .with_maximized(true);
     if let Some(icon) = icon() {
         viewport = viewport.with_icon(icon);
     }
