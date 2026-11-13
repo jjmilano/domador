@@ -3653,6 +3653,8 @@ impl DomadorUi {
         }
         ui.add_space(12.0);
         hardware_guide(ui);
+        ui.add_space(4.0);
+        power_guide(ui);
 
         // Avisos: primero lo que bloquea, después lo que informa.
         if !motor {
@@ -4426,6 +4428,27 @@ fn memguard_card(ui: &mut egui::Ui, width: f32, state: &Value, busy: bool) -> Op
                 ui.add(egui::Label::new(RichText::new(reason).size(10.5).color(MUTED)).wrap());
             }
         }
+        // Diagnóstico en castellano: qué está limitando de verdad.
+        let diagnosis = text_of(pressure.get("diagnosis"));
+        if !diagnosis.is_empty() {
+            let cause = text_of(pressure.get("cause"));
+            let tint = match cause {
+                "commit" => WARN,
+                "ram" => COPPER_HI,
+                _ => OK,
+            };
+            ui.add_space(8.0);
+            egui::Frame::new()
+                .fill(a(tint, 14))
+                .stroke(mk_stroke(1.0, a(tint, 70)))
+                .corner_radius(7.0)
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(diagnosis).size(10.5).color(TEXT)).wrap(),
+                    );
+                });
+        }
         ui.add_space(10.0);
         let commit_color = if warn_commit > 0.0 && commit_pct >= warn_commit {
             COPPER_HI
@@ -4462,6 +4485,33 @@ fn memguard_card(ui: &mut egui::Ui, width: f32, state: &Value, busy: bool) -> Op
         };
         kv(ui, "Último alivio", &last, MUTED);
         kv(ui, "Alivios", &reliefs.to_string(), MUTED);
+        let pagefile = num(pressure.get("pagefile"));
+        if pagefile > 0 {
+            kv(ui, "Paginación", &fmt_bytes(pagefile), MUTED);
+        }
+        if let Some(top) = pressure.get("top_commit").and_then(|v| v.as_array()) {
+            if !top.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("QUIÉN RESERVA MÁS")
+                        .size(9.0)
+                        .strong()
+                        .color(FAINT),
+                );
+                ui.add_space(2.0);
+                for entry in top.iter().take(5) {
+                    let name = text_of(entry.get("name"));
+                    let count = num(entry.get("count"));
+                    let private = num(entry.get("private"));
+                    let label = if count > 1 {
+                        format!("{name} ×{count}")
+                    } else {
+                        name.to_string()
+                    };
+                    kv(ui, &label, &fmt_bytes(private), TEXT);
+                }
+            }
+        }
         ui.add_space(10.0);
         hairline(ui, ui.cursor().top(), BORDER_SOFT);
         ui.add_space(10.0);
@@ -5737,6 +5787,32 @@ fn fan_row(ui: &mut egui::Ui, name: &str, rpm: u32, max: u32) {
     meter(ui, frac, color);
 }
 
+fn power_guide(ui: &mut egui::Ui) {
+    egui::CollapsingHeader::new("Guía · de dónde sale el poder (watts, cargador y modos)")
+        .default_open(false)
+        .show(ui, |ui| {
+            let para = |ui: &mut egui::Ui, text: &str| {
+                ui.add(egui::Label::new(RichText::new(text).size(10.5).color(MUTED)).wrap());
+                ui.add_space(6.0);
+            };
+            let head = |ui: &mut egui::Ui, text: &str| {
+                ui.label(RichText::new(text).size(11.0).strong().color(TEXT));
+                ui.add_space(3.0);
+            };
+            ui.add_space(4.0);
+            head(ui, "Los watts son el combustible");
+            para(ui, "Cada chip rinde según cuánta energía lo dejan usar. Más watts = más MHz = más FPS, hasta que el calor lo frena. En tu Legion: la RTX 3070 puede usar hasta 140 W (115 W base + 25 W de Dynamic Boost, que le presta el CPU cuando le sobra). El Ryzen 7 5800H tiene dos límites: 'largo' (lo que sostiene minutos, 45 W en tu BIOS) y 'corto' (el pico de unos segundos, hasta 88 W).");
+            head(ui, "El modo térmico abre o cierra la canilla");
+            para(ui, "Silencioso (LED azul) limita la GPU y los fans. Equilibrado (blanco) deja la GPU en ~115 W. Rendimiento (rojo) destraba los 140 W y deja que los fans giren más. Para máximo rendimiento: Rendimiento, siempre con cargador.");
+            head(ui, "La corriente: el cargador manda");
+            para(ui, "Con batería, la notebook no puede entregar 140 W a la GPU más el CPU: la batería sola da bastante menos y se agota en minutos. Por eso el modo Máximo sólo fuerza Rendimiento con el cargador de 300 W enchufado. Si usás un cargador más chico (USB-C, por ejemplo), la BIOS también recorta.");
+            head(ui, "Por qué fans a fondo = más rendimiento");
+            para(ui, "Los ventiladores no le roban potencia al juego: consumen 2–5 W. Cuando el chip llega a ~87 °C (GPU) o ~95 °C (CPU), baja solo los MHz para protegerse (throttling). Enfriar antes de llegar ahí es lo que sostiene los FPS. Por eso Domador mira la pendiente: si el calor sube rápido, acelera los fans antes de que la temperatura llegue al límite.");
+            head(ui, "Lo que no se puede por software");
+            para(ui, "Tu BIOS (Gen 6) no permite definir una curva de fans ni dar más de 140 W a la GPU, y el 5800H no tiene undervolt. Lo que sí suma fuera de Domador: limpiar el polvo, cambiar la pasta térmica si tiene años, una base con ventilación y no apoyar la notebook en tela.");
+        });
+}
+
 fn hardware_guide(ui: &mut egui::Ui) {
     egui::CollapsingHeader::new("Guía rápida · qué es el EC y qué temperatura es sana")
         .default_open(false)
@@ -6407,6 +6483,11 @@ struct AdaptiveData {
     cooldown_s: Option<f64>,
     state: String,
     last_action: Option<String>,
+    action: String,
+    explain: Option<String>,
+    gpu_power: Option<f64>,
+    on_ac: Option<bool>,
+    slope: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -6483,7 +6564,12 @@ fn get_adaptive() -> Result<AdaptiveData, AdaptiveErr> {
                 state: jstr(&value, &["state", "level", "stage"])
                     .unwrap_or("normal")
                     .to_ascii_lowercase(),
-                last_action: jstr(&value, &["last_action", "action"]).map(str::to_string),
+                last_action: jstr(&value, &["last_action"]).map(str::to_string),
+                action: jstr(&value, &["action"]).unwrap_or("fans").to_string(),
+                explain: jstr(&value, &["explain"]).map(str::to_string),
+                gpu_power: sample_num(&value, &["gpu_power_w"]),
+                on_ac: jbool(&value, &["on_ac"]),
+                slope: sample_num(&value, &["slope_c_s"]),
             })
         }
         Err(ureq::Error::Status(code, response)) => Err(AdaptiveErr::from_status(
@@ -7749,7 +7835,7 @@ fn legion_adaptive_card(
         ui.add(
             egui::Label::new(
                 RichText::new(
-                    "El motor mira la temperatura del EC y sube escalones solo: objetivo → caliente → crítico, con histéresis para no oscilar. La UI sólo muestra el estado y manda los límites; la decisión es del backend.",
+                    "Elegí cómo decide. Domador mira la temperatura, la potencia de la GPU y cuán rápido sube el calor, y actúa solo. Todo es reversible: si lo apagás, vuelve todo a como estaba.",
                 )
                 .size(9.5)
                 .color(FAINT),
@@ -7757,6 +7843,124 @@ fn legion_adaptive_card(
             .wrap(),
         );
         ui.add_space(9.0);
+
+        // Selector de estrategia.
+        let current = data.map(|d| d.action.as_str()).unwrap_or("fans");
+        eyebrow(ui, "Estrategia");
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let options: [(&str, &str, &str); 2] = [
+                (
+                    "max",
+                    "Máximo",
+                    "Performance siempre con cargador, fans a fondo ANTES de que caliente y freno de CPU sólo si llega a crítico. Para jugar o compilar sin que nada se frene. Hace ruido, a propósito.",
+                ),
+                (
+                    "fans",
+                    "Clásico",
+                    "Sólo reacciona: fans a fondo cuando pasa el umbral 'Caliente' y vuelve al bajar. No cambia el modo térmico ni toca el CPU.",
+                ),
+            ];
+            for (key, label, tip) in options {
+                let active = current == key;
+                if btn(
+                    ui,
+                    label,
+                    92.0,
+                    26.0,
+                    if active { Btn::Primary } else { Btn::Secondary },
+                    live && !active,
+                )
+                .on_hover_text(tip)
+                .clicked()
+                {
+                    lstate.ad_edited = false;
+                    if key == "max" {
+                        lstate.ad_enabled = true;
+                        lstate.ad_target = 58;
+                        lstate.ad_hot = 70;
+                        lstate.ad_critical = 90;
+                        intents.adaptive = Some(json!({
+                            "enabled": true,
+                            "action": "max",
+                            "target_c": 58,
+                            "hot_c": 70,
+                            "critical_c": 90,
+                            "hysteresis_c": 4,
+                            "dwell_s": 4,
+                            "cooldown_s": 15,
+                        }));
+                    } else {
+                        lstate.ad_target = 82;
+                        lstate.ad_hot = 85;
+                        lstate.ad_critical = 92;
+                        intents.adaptive = Some(json!({
+                            "action": "fans",
+                            "target_c": 82,
+                            "hot_c": 85,
+                            "critical_c": 92,
+                            "hysteresis_c": 3,
+                            "dwell_s": 10,
+                            "cooldown_s": 30,
+                        }));
+                    }
+                }
+            }
+        });
+        ui.add_space(6.0);
+        if current == "max" {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Modo Máximo: 1) con cargador pone Performance (la GPU puede usar 140 W en vez de ~115). 2) Si la temperatura sube más de 0,4 °C por segundo o la GPU pasa 85 W, pone los fans a fondo antes de que llegue el calor: un chip frío sostiene más MHz. 3) Si aun así pasa 90 °C durante 12 s, baja el CPU un escalón para proteger. 4) Vuelve a fans automáticos recién tras 2 minutos de reposo, para no subir y bajar cada rato.",
+                    )
+                    .size(10.0)
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+            ui.add_space(6.0);
+        }
+
+        // Qué está haciendo ahora mismo, en castellano.
+        if let Some(explain) = data.and_then(|d| d.explain.clone()) {
+            egui::Frame::new()
+                .fill(a(BRASS, 14))
+                .stroke(mk_stroke(1.0, a(BRASS, 70)))
+                .corner_radius(7.0)
+                .inner_margin(Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("AHORA").size(9.0).strong().color(BRASS));
+                    ui.add(egui::Label::new(RichText::new(explain).size(10.5).color(TEXT)).wrap());
+                });
+            ui.add_space(6.0);
+        }
+        if let Some(d) = data {
+            ui.horizontal_wrapped(|ui| {
+                let ac = match d.on_ac {
+                    Some(true) => ("Con cargador", OK),
+                    Some(false) => ("Con batería", WARN),
+                    None => ("Cargador: —", FAINT),
+                };
+                badge(ui, ac.0, ac.1, a(ac.1, 20));
+                if let Some(w) = d.gpu_power {
+                    badge(ui, &format!("GPU {w:.0} W"), MUTED, a(MUTED, 16));
+                }
+                if let Some(slope) = d.slope {
+                    let color = if slope >= 0.4 {
+                        COPPER_HI
+                    } else if slope > 0.1 {
+                        WARN
+                    } else {
+                        MUTED
+                    };
+                    badge(ui, &format!("{slope:+.2} °C/s"), color, a(color, 16))
+                        .on_hover_text("Pendiente: cuánto sube o baja la temperatura por segundo");
+                }
+            });
+            ui.add_space(8.0);
+        }
 
         eyebrow(ui, "Escalones");
         ui.add_space(2.0);

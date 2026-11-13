@@ -37,6 +37,10 @@ pub enum ActionKind {
     Fans,
     /// Fans y, si el calor sigue en crítico, un paso menos de límite de CPU.
     FansCpu,
+    /// Máximo rendimiento seguro: modo Performance con cargador, fans a fondo
+    /// **antes** de que caliente (mira la pendiente y la potencia de la GPU,
+    /// no sólo el umbral) y freno de CPU sólo en crítico sostenido.
+    Max,
 }
 
 impl ActionKind {
@@ -44,6 +48,7 @@ impl ActionKind {
         match self {
             ActionKind::Fans => "fans",
             ActionKind::FansCpu => "fans_cpu",
+            ActionKind::Max => "max",
         }
     }
 
@@ -51,6 +56,7 @@ impl ActionKind {
         match text.trim().to_ascii_lowercase().as_str() {
             "fans" => Some(ActionKind::Fans),
             "fans_cpu" | "fans+cpu" | "cpu" => Some(ActionKind::FansCpu),
+            "max" | "maximo" | "máximo" => Some(ActionKind::Max),
             _ => None,
         }
     }
@@ -177,6 +183,7 @@ enum Intent {
     CpuDown,
     CpuRestore,
     FansOff,
+    ModePerf,
 }
 
 impl Intent {
@@ -186,6 +193,7 @@ impl Intent {
             Intent::CpuDown => "cpu_cap",
             Intent::CpuRestore => "cpu_restore",
             Intent::FansOff => "fans_off",
+            Intent::ModePerf => "mode_performance",
         }
     }
 }
@@ -206,7 +214,22 @@ struct State {
     last_available: Option<bool>,
     last_admin: bool,
     busy: bool,
+    /// Últimos ~30 s de temperatura para medir la pendiente (°C/s).
+    history: VecDeque<(f64, f64)>,
+    last_power: Option<f64>,
+    last_ac: Option<bool>,
+    last_thermal: Option<u8>,
+    power_since: Option<f64>,
+    /// Qué está haciendo el control y por qué, en castellano llano.
+    explain: String,
 }
+
+/// Parámetros del modo Máximo. Calibrados para la Legion 5 Pro Gen 6: la
+/// RTX 3070 Laptop empieza a recortar clocks cerca de 87 °C y el 5800H a 95 °C.
+const MAX_SLOPE_C_PER_S: f64 = 0.4;
+const MAX_POWER_W: f64 = 85.0;
+const MAX_IDLE_POWER_W: f64 = 55.0;
+const MAX_REST_S: f64 = 120.0;
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 
@@ -261,6 +284,12 @@ impl State {
             last_available: None,
             last_admin: crate::win::is_admin(),
             busy: false,
+            history: VecDeque::new(),
+            last_power: None,
+            last_ac: None,
+            last_thermal: None,
+            power_since: None,
+            explain: String::new(),
         }
     }
 
@@ -361,6 +390,130 @@ impl State {
         None
     }
 
+    /// Pendiente de temperatura (°C/s) en los últimos ~10 s.
+    fn slope(&self, now: f64) -> Option<f64> {
+        let (_, current) = *self.history.back()?;
+        let (t0, v0) = self
+            .history
+            .iter()
+            .find(|(ts, _)| now - ts <= 12.0)
+            .copied()?;
+        let dt = now - t0;
+        if dt < 6.0 {
+            return None;
+        }
+        Some((current - v0) / dt)
+    }
+
+    /// Modo Máximo: anticipa el calor en vez de reaccionar tarde.
+    ///
+    /// - Con cargador y sin modo Performance → pone Performance (GPU a 140 W).
+    /// - Fans a fondo si: la temperatura sube rápido (pendiente), la GPU tira
+    ///   mucha potencia sostenida, o se pasa `hot_c` sostenido.
+    /// - En `critical_c` sostenido (fans ya a fondo) baja un paso el CPU.
+    /// - Vuelve atrás sólo con la máquina en reposo `MAX_REST_S` seguidos.
+    fn decide_max(
+        &mut self,
+        now: f64,
+        temp: f64,
+        power: Option<f64>,
+        ac: bool,
+        thermal: Option<u8>,
+    ) -> Option<(Intent, &'static str)> {
+        self.history.push_back((now, temp));
+        while self
+            .history
+            .front()
+            .map(|(ts, _)| now - ts > 30.0)
+            .unwrap_or(false)
+        {
+            self.history.pop_front();
+        }
+        let slope = self.slope(now).unwrap_or(0.0);
+        let heavy = power.map(|w| w >= MAX_POWER_W).unwrap_or(false);
+        if heavy {
+            if self.power_since.is_none() {
+                self.power_since = Some(now);
+            }
+        } else {
+            self.power_since = None;
+        }
+        let hot = temp >= self.cfg.hot_c;
+        let critical = temp >= self.cfg.critical_c;
+        let idle = power.map(|w| w < MAX_IDLE_POWER_W).unwrap_or(true);
+        let cool = temp <= self.cfg.exit_c() && idle && slope <= 0.05;
+        if hot {
+            self.hot_since.get_or_insert(now);
+        } else {
+            self.hot_since = None;
+        }
+        if cool {
+            self.cool_since.get_or_insert(now);
+        } else {
+            self.cool_since = None;
+        }
+
+        // Explicación del estado actual (aunque no haya acción).
+        self.explain = if !ac {
+            format!(
+                "Con batería: no fuerzo Performance (la GPU igual queda limitada y la batería dura minutos). {temp:.0} °C."
+            )
+        } else if self.level >= 2 {
+            format!("Freno de emergencia: {temp:.0} °C con fans a fondo. CPU un paso abajo hasta que enfríe.")
+        } else if self.level == 1 {
+            format!(
+                "Fans a fondo · {temp:.0} °C · GPU {} · pendiente {slope:+.2} °C/s. Vuelvo a auto tras {:.0} s de reposo.",
+                power.map(|w| format!("{w:.0} W")).unwrap_or_else(|| "—".into()),
+                MAX_REST_S
+            )
+        } else {
+            format!(
+                "Listo y mirando: {temp:.0} °C, GPU {}. Si la temperatura sube rápido o la GPU pasa {MAX_POWER_W:.0} W, pongo los fans a fondo antes de que caliente.",
+                power.map(|w| format!("{w:.0} W")).unwrap_or_else(|| "—".into())
+            )
+        };
+
+        let cooldown_ok = self.cooldown_ok(now);
+        // 1) Enchufada → modo Performance (lo único que destraba los 140 W de la GPU).
+        if ac && thermal.is_some() && thermal != Some(3) && cooldown_ok {
+            return Some((Intent::ModePerf, "enchufada"));
+        }
+        // 2) Subir: anticipar es inmediato; potencia y calor piden sostenerse.
+        if self.level == 0 {
+            if slope >= MAX_SLOPE_C_PER_S && temp >= self.cfg.target_c - 15.0 {
+                return Some((Intent::FansOn, "anticipa"));
+            }
+            if cooldown_ok && self.dwell_elapsed(self.power_since, now) {
+                return Some((Intent::FansOn, "carga"));
+            }
+            if cooldown_ok && hot && self.dwell_elapsed(self.hot_since, now) {
+                return Some((Intent::FansOn, "calor"));
+            }
+        }
+        if self.level == 1 && critical && cooldown_ok {
+            let held = self
+                .hot_since
+                .map(|start| now - start >= self.cfg.dwell_s * 3.0)
+                .unwrap_or(false);
+            if held {
+                return Some((Intent::CpuDown, "critico"));
+            }
+        }
+        // 3) Bajar: sólo con reposo largo y de a un escalón.
+        let rested = self
+            .cool_since
+            .map(|start| now - start >= MAX_REST_S)
+            .unwrap_or(false);
+        if rested && cooldown_ok {
+            match self.level {
+                2 => return Some((Intent::CpuRestore, "enfriado")),
+                1 => return Some((Intent::FansOff, "reposo")),
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn push_log(&mut self, entry: Value) {
         self.last_action = Some(entry.clone());
         self.last_action_at = entry
@@ -410,6 +563,9 @@ impl State {
                     if let Some(base) = self.baseline.as_mut() {
                         base.full_speed = None;
                     }
+                }
+                Intent::ModePerf => {
+                    self.last_thermal = Some(3);
                 }
             }
         } else {
@@ -482,6 +638,9 @@ impl State {
 /// Ejecuta la escritura real. Sólo se llama con admin + WMI disponible.
 fn execute(intent: Intent) -> Result<String, String> {
     match intent {
+        Intent::ModePerf => legion::set_thermal(&json!({"mode": 3}))
+            .map(|_| "modo Performance (GPU hasta 140 W)".to_string())
+            .map_err(|err| err.message),
         Intent::FansOn => legion::set_fans(&json!({"full_speed": true}))
             .map(|_| "full speed activado".to_string())
             .map_err(|err| err.message),
@@ -570,7 +729,20 @@ pub fn observe(sample: &Sample, available: bool) {
         match temp {
             Some(temp) => {
                 state.last_temp = Some(temp);
-                Some((state.decide(now, temp, admin, available), temp))
+                state.last_power = sample.gpu_power_w;
+                state.last_thermal = sample.thermal_mode;
+                let ac = crate::win::ac_online();
+                state.last_ac = Some(ac);
+                let decision = if state.cfg.action == ActionKind::Max
+                    && state.cfg.enabled
+                    && admin
+                    && available
+                {
+                    state.decide_max(now, temp, sample.gpu_power_w, ac, sample.thermal_mode)
+                } else {
+                    state.decide(now, temp, admin, available)
+                };
+                Some((decision, temp))
             }
             None => None,
         }
@@ -659,6 +831,10 @@ pub fn status() -> Value {
         "last_action_time": if state.last_action_at > 0.0 { json!(iso_utc(state.last_action_at)) } else { Value::Null },
         "last_action_detail": state.last_action,
         "last_temp_c": state.last_temp,
+        "explain": if state.cfg.enabled { json!(state.explain) } else { Value::Null },
+        "gpu_power_w": state.last_power,
+        "on_ac": state.last_ac,
+        "slope_c_s": state.slope(now).map(|v| (v * 100.0).round() / 100.0),
         "busy": state.busy,
         "writes": state.writes,
         "failures": state.failures,
@@ -721,11 +897,11 @@ pub fn update(body: &Value) -> Result<Value, Error> {
     if let Some(value) = body.get("action") {
         let text = value.as_str().ok_or_else(|| Error {
             status: 400,
-            message: "action debe ser \"fans\" o \"fans_cpu\"".into(),
+            message: "action debe ser \"fans\", \"fans_cpu\" o \"max\"".into(),
         })?;
         cfg.action = ActionKind::parse(text).ok_or_else(|| Error {
             status: 400,
-            message: "action inválida: usá \"fans\" o \"fans_cpu\"".into(),
+            message: "action inválida: usá \"fans\", \"fans_cpu\" o \"max\"".into(),
         })?;
     }
     cfg.validate().map_err(|message| Error {
@@ -906,5 +1082,90 @@ mod tests {
         // Apagado no hace nada aunque haya 100 °C.
         let mut state = controller(false, ActionKind::Fans);
         assert_eq!(state.decide(0.0, 100.0, true, true), None);
+    }
+
+    fn max_controller() -> State {
+        let mut state = controller(true, ActionKind::Max);
+        state.cfg.target_c = 58.0;
+        state.cfg.hot_c = 70.0;
+        state.cfg.critical_c = 90.0;
+        state.cfg.hysteresis_c = 4.0;
+        state.cfg.dwell_s = 4.0;
+        state.cfg.cooldown_s = 15.0;
+        state.history.clear();
+        state.power_since = None;
+        state
+    }
+
+    #[test]
+    fn max_pone_performance_solo_con_cargador() {
+        let mut state = max_controller();
+        assert_eq!(
+            state.decide_max(0.0, 50.0, Some(20.0), true, Some(2)),
+            Some((Intent::ModePerf, "enchufada"))
+        );
+        let mut state = max_controller();
+        assert_eq!(
+            state.decide_max(0.0, 50.0, Some(20.0), false, Some(2)),
+            None
+        );
+    }
+
+    #[test]
+    fn max_anticipa_por_pendiente_antes_del_umbral() {
+        let mut state = max_controller();
+        // Sube 6 °C en 8 s (0,75 °C/s) y todavía está lejos de hot_c.
+        assert_eq!(state.decide_max(0.0, 55.0, Some(30.0), true, Some(3)), None);
+        assert_eq!(state.decide_max(4.0, 58.0, Some(30.0), true, Some(3)), None);
+        assert_eq!(
+            state.decide_max(8.0, 61.0, Some(30.0), true, Some(3)),
+            Some((Intent::FansOn, "anticipa"))
+        );
+    }
+
+    #[test]
+    fn max_sube_por_carga_sostenida_y_baja_solo_en_reposo_largo() {
+        let mut state = max_controller();
+        assert_eq!(
+            state.decide_max(0.0, 60.0, Some(120.0), true, Some(3)),
+            None
+        );
+        assert_eq!(
+            state.decide_max(5.0, 60.0, Some(120.0), true, Some(3)),
+            Some((Intent::FansOn, "carga"))
+        );
+        state.level = 1;
+        state.last_action_at = 5.0;
+        // Frío y en reposo, pero recién: no baja todavía.
+        assert_eq!(
+            state.decide_max(30.0, 50.0, Some(20.0), true, Some(3)),
+            None
+        );
+        assert_eq!(
+            state.decide_max(100.0, 50.0, Some(20.0), true, Some(3)),
+            None
+        );
+        assert_eq!(
+            state.decide_max(160.0, 50.0, Some(20.0), true, Some(3)),
+            Some((Intent::FansOff, "reposo"))
+        );
+    }
+
+    #[test]
+    fn max_freno_de_cpu_solo_en_critico_sostenido() {
+        let mut state = max_controller();
+        state.level = 1;
+        assert_eq!(
+            state.decide_max(0.0, 91.0, Some(130.0), true, Some(3)),
+            None
+        );
+        assert_eq!(
+            state.decide_max(6.0, 91.0, Some(130.0), true, Some(3)),
+            None
+        );
+        assert_eq!(
+            state.decide_max(13.0, 91.0, Some(130.0), true, Some(3)),
+            Some((Intent::CpuDown, "critico"))
+        );
     }
 }

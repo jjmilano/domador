@@ -73,6 +73,20 @@ pub struct MemPressure {
     pub reliefs: u32,
     pub last_relief_at: f64,
     pub last_relief_freed: u64,
+    /// Tamaño actual del archivo de paginación (commit_limit - RAM física).
+    pub pagefile: u64,
+    /// Qué está limitando, en castellano: commit/paginación, RAM física o nada.
+    pub cause: String,
+    pub diagnosis: String,
+    /// Apps (agrupadas por nombre) que más commit reservan: memoria privada.
+    pub top_commit: Vec<CommitEntry>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CommitEntry {
+    pub name: String,
+    pub count: u32,
+    pub private: u64,
 }
 
 impl Default for MemPressure {
@@ -96,6 +110,10 @@ impl Default for MemPressure {
             reliefs: 0,
             last_relief_at: 0.0,
             last_relief_freed: 0,
+            pagefile: 0,
+            cause: "ok".into(),
+            diagnosis: String::new(),
+            top_commit: Vec::new(),
         }
     }
 }
@@ -1612,8 +1630,70 @@ impl Engine {
             reasons.push(format!("disponible {available_pct:.0}% de la RAM"));
         }
 
+        // Diagnóstico: con mucha RAM libre y commit alto, el techo lo pone el
+        // archivo de paginación, no la RAM. Recortar working sets no baja el
+        // commit; agrandar la paginación o cerrar apps, sí.
+        let pagefile = mem.commit_limit.saturating_sub(total);
+        let gb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let (cause, diagnosis) = if commit_pct >= 75.0 && available_pct >= 20.0 {
+            (
+                "commit",
+                format!(
+                    "La RAM tiene lugar ({:.1} GB libres), pero las apps ya reservaron el {commit_pct:.0}% \
+                     del commit (RAM + paginación = {:.1} GB). Cuando el commit se llena, Windows \
+                     se traba o cierra apps aunque sobre RAM. El archivo de paginación mide {:.1} GB: \
+                     dejá que Windows lo administre solo para subir el techo. Liberar RAM no baja el commit.",
+                    gb(mem.available),
+                    gb(mem.commit_limit),
+                    gb(pagefile)
+                ),
+            )
+        } else if available_pct < 15.0 {
+            (
+                "ram",
+                format!(
+                    "Quedan {:.1} GB de RAM física libres. Acá sí ayuda aliviar procesos de fondo \
+                     o pasar a Eco los navegadores y apps web que no estás usando.",
+                    gb(mem.available)
+                ),
+            )
+        } else {
+            (
+                "ok",
+                format!(
+                    "Memoria sana: {:.1} GB de RAM libres y commit al {commit_pct:.0}%.",
+                    gb(mem.available)
+                ),
+            )
+        };
+        let mut grouped: HashMap<String, (u32, u64)> = HashMap::new();
+        for row in &self.rows {
+            let name = row
+                .name
+                .strip_suffix(".exe")
+                .unwrap_or(&row.name)
+                .to_string();
+            let entry = grouped.entry(name).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += row.private;
+        }
+        let mut top_commit: Vec<CommitEntry> = grouped
+            .into_iter()
+            .map(|(name, (count, private))| CommitEntry {
+                name,
+                count,
+                private,
+            })
+            .collect();
+        top_commit.sort_by(|a, b| b.private.cmp(&a.private));
+        top_commit.truncate(6);
+
         let previous = self.mem_pressure.level.clone();
         let pressure = &mut self.mem_pressure;
+        pressure.pagefile = pagefile;
+        pressure.cause = cause.to_string();
+        pressure.diagnosis = diagnosis;
+        pressure.top_commit = top_commit;
         pressure.level = level.to_string();
         pressure.reasons = reasons;
         pressure.commit_pct = (commit_pct * 10.0).round() / 10.0;

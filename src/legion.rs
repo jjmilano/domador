@@ -163,6 +163,17 @@ pub fn sample() -> Value {
     }
 }
 
+/// Sonda de solo lectura: llama a cada getter sin parámetros de
+/// `LENOVO_GAMEZONE_DATA` y devuelve el valor crudo o el error. Sirve para
+/// descubrir qué expone el BIOS de cada modelo (temperaturas, potencia GPU,
+/// cargador) sin escribir nada en el EC.
+pub fn probe() -> Value {
+    match send(JobReq::Probe) {
+        Ok(value) => value,
+        Err(err) => json!({"ok": false, "error": err.message}),
+    }
+}
+
 /// Nombre estable del modo térmico (`quiet|balance|performance|custom`) o
 /// `unknown`. Lo usan la telemetría y el control adaptativo.
 pub fn thermal_key(id: u8) -> String {
@@ -283,6 +294,7 @@ fn parse_mode(value: Option<&Value>) -> Option<u8> {
 enum JobReq {
     Status,
     Sample,
+    Probe,
     Thermal {
         id: u8,
     },
@@ -366,6 +378,7 @@ fn worker(rx: Receiver<Job>) {
         let result = match job.req {
             JobReq::Status => Ok(ctx.status()),
             JobReq::Sample => Ok(ctx.sample()),
+            JobReq::Probe => Ok(ctx.probe()),
             JobReq::Thermal { id } => ctx.apply_thermal(id),
             JobReq::Fans { full_speed, table } => ctx.apply_fans(full_speed, table),
             JobReq::Cpu { long, short } => ctx.apply_cpu(long, short),
@@ -528,6 +541,51 @@ impl Ctx {
     }
 
     // --------------------------------------------------------- lecturas
+
+    fn probe(&mut self) -> Value {
+        const GETTERS: &[&str] = &[
+            "GetCPUTemp",
+            "GetGPUTemp",
+            "GetIRTemp",
+            "GetTriggerTemperatureValue",
+            "GetGPUPow",
+            "GetGPUOCPow",
+            "GetGPUOCType",
+            "GetGpuGpsState",
+            "IsSupportGpuOC",
+            "IsSupportCpuOC",
+            "IsBIOSSupportOC",
+            "GetBIOSOCMode",
+            "IsACFitForOC",
+            "IsSupportOD",
+            "GetODStatus",
+            "IsSupportFanCooling",
+            "GetFanCoolingStatus",
+            "IsSupportSmartFan",
+            "GetSmartFanMode",
+            "GetSmartFanSetting",
+            "GetThermalMode",
+            "GetThermalTableID",
+            "GetIntelligentSubMode",
+            "GetCpuFrequency",
+            "GetPowerChargeMode",
+            "GetFanCount",
+            "GetFan1Speed",
+            "GetFan2Speed",
+            "GetFanMaxSpeed",
+            "GetHardwareInfoSupportVersion",
+            "GetVersion",
+        ];
+        let mut out = serde_json::Map::new();
+        for method in GETTERS {
+            let value = match self.call_int(CLASS_GAMEZONE, method, &[], "Data") {
+                Ok(v) => json!(v),
+                Err(err) => json!({ "error": err }),
+            };
+            out.insert((*method).to_string(), value);
+        }
+        json!({"ok": true, "admin": win::is_admin(), "gamezone": out})
+    }
 
     fn status(&mut self) -> Value {
         if let Some((at, value)) = &self.cache {

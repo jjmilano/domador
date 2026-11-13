@@ -191,6 +191,9 @@ fn handle(mut request: Request, engine: Shared) {
             }
             // Historial de telemetría (ring de 24 h). Nunca 500: si WMI no
             // está, responde 200 con samples vacíos o con nulls.
+            "/api/legion/probe" => {
+                return reply(request, 200, &crate::legion::probe());
+            }
             "/api/legion/history" => {
                 return match crate::telemetry::history(&url) {
                     Ok(value) => reply(request, 200, &value),
@@ -376,6 +379,7 @@ fn is_get_only(path: &str) -> bool {
             | "/api/mem"
             | "/api/families"
             | "/api/legion"
+            | "/api/legion/probe"
             | "/api/legion/history"
             | "/api/legion/export.csv"
             | "/api/process"
