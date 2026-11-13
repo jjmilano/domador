@@ -9,14 +9,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
   build:
-    name: build (windows-latest)
+    name: build y verificación (windows-latest)
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -43,20 +48,97 @@ jobs:
       - name: Tests
         run: cargo test --all-targets --verbose
 
-      - name: Build release
-        run: cargo build --release --verbose
+      - name: Build release de los tres binarios
+        run: cargo build --release --bins --locked --verbose
 
-      - name: Verificar binario
+      - name: Verificar binarios
         shell: pwsh
         run: |
-          $exe = "target/release/domador.exe"
-          if (-not (Test-Path $exe)) { throw "No se generó $exe" }
-          Get-Item $exe | Select-Object Name, Length, LastWriteTime
+          $expected = @("domador.exe", "domador-ui.exe", "domador-tray.exe")
+          foreach ($name in $expected) {
+            $path = Join-Path "target/release" $name
+            if (-not (Test-Path $path)) { throw "No se generó $path" }
+            $item = Get-Item $path
+            $version = $item.VersionInfo.FileVersion
+            Write-Host ("{0,-18} {1,10:N0} bytes  FileVersion={2}" -f $name, $item.Length, $version)
+            if ($item.Length -lt 100000) { throw "$name es sospechosamente chico" }
+          }
+
+      - name: Verificar assets embebibles
+        shell: pwsh
+        run: |
+          $required = @(
+            "assets/domador.ico",
+            "assets/domador.png",
+            "assets/favicon.ico",
+            "assets/icon-32.png",
+            "assets/icon-64.png",
+            "assets/icon-256.png"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) { throw "Falta asset: $path" }
+          }
+          $frames = Get-ChildItem "assets/tray/anim*.ico" | Sort-Object Name
+          if ($frames.Count -ne 8) { throw "Se esperaban 8 frames de bandeja, hay $($frames.Count)" }
+          Write-Host "Assets OK: iconos + $($frames.Count) frames"
+
+      - name: Verificar versión de README/Cargo
+        shell: pwsh
+        run: |
+          $match = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"'
+          if (-not $match) { throw "No pude leer la versión de Cargo.toml" }
+          $version = $match.Matches[0].Groups[1].Value
+          $readme = Get-Content README.md -Raw
+          if ($readme -notmatch [regex]::Escape("v$version")) {
+            throw "README no menciona v$version (Cargo.toml=$version)"
+          }
+          if (-not (Test-Path "docs/ROADMAP-V2.md")) { throw "Falta docs/ROADMAP-V2.md" }
+          Write-Host "Versión consistente: $version"
+
+      - name: Verificar scripts del instalador (sintaxis)
+        shell: pwsh
+        run: |
+          $scripts = @(
+            "scripts/install-admin.ps1",
+            "installer/build.ps1",
+            "installer/check-update.ps1",
+            "installer/verify-hashes.ps1"
+          )
+          foreach ($path in $scripts) {
+            if (-not (Test-Path $path)) { throw "Falta $path" }
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path), [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host $_ }
+              throw "Error de sintaxis en $path"
+            }
+            Write-Host "OK sintaxis: $path"
+          }
+          if (-not (Test-Path "installer/domador.iss")) { throw "Falta installer/domador.iss" }
+
+      - name: Python para benchmark
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias del benchmark
+        run: python -m pip install --disable-pip-version-check -r bench/requirements.txt
+
+      - name: Verificar benchmark
+        run: |
+          python -m py_compile bench/bench.py
+          python bench/bench.py --check
 
       - name: Subir artefacto
         uses: actions/upload-artifact@v4
         with:
           name: domador-windows-x64
-          path: target/release/domador.exe
+          path: |
+            target/release/domador.exe
+            target/release/domador-ui.exe
+            target/release/domador-tray.exe
           if-no-files-found: error
           retention-days: 14

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS;
 
@@ -16,6 +17,148 @@ type Key = (u32, i64);
 type KeySet = HashSet<Key>;
 
 const MB: u64 = 1024 * 1024;
+
+// ------------------------------------------------------------------ MemGuard
+
+/// Umbrales de presión de memoria. Sólo avisa y, opcionalmente, alivia
+/// working sets de fondo: nunca termina procesos.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct MemGuard {
+    pub enabled: bool,
+    /// Porcentaje de commit usado que dispara el aviso.
+    pub warn_commit_pct: f64,
+    /// Porcentaje de RAM física disponible por debajo del cual avisa.
+    pub warn_available_pct: f64,
+    /// Alivio automático (working sets de fondo) cuando hay presión.
+    pub relief: bool,
+    /// Mínimo entre alivios automáticos.
+    pub relief_interval_s: u32,
+    /// Mínimo entre avisos repetidos del mismo nivel.
+    pub warn_cooldown_s: u32,
+}
+
+impl Default for MemGuard {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            warn_commit_pct: 88.0,
+            warn_available_pct: 7.0,
+            relief: false,
+            relief_interval_s: 900,
+            warn_cooldown_s: 900,
+        }
+    }
+}
+
+/// Foto de la presión de memoria del último tick. `level` es "ok", "warn" o
+/// "critical"; el resto son los números que lo justifican.
+#[derive(Serialize, Clone, Debug)]
+pub struct MemPressure {
+    pub level: String,
+    pub reasons: Vec<String>,
+    pub commit_pct: f64,
+    pub available_pct: f64,
+    pub available: u64,
+    pub commit_used: u64,
+    pub commit_limit: u64,
+    pub commit_free: u64,
+    pub cache: u64,
+    pub pool_paged: u64,
+    pub pool_nonpaged: u64,
+    pub handles: u32,
+    pub processes: u32,
+    pub warned: bool,
+    pub warned_at: f64,
+    pub reliefs: u32,
+    pub last_relief_at: f64,
+    pub last_relief_freed: u64,
+}
+
+impl Default for MemPressure {
+    fn default() -> Self {
+        Self {
+            level: "ok".into(),
+            reasons: Vec::new(),
+            commit_pct: 0.0,
+            available_pct: 0.0,
+            available: 0,
+            commit_used: 0,
+            commit_limit: 0,
+            commit_free: 0,
+            cache: 0,
+            pool_paged: 0,
+            pool_nonpaged: 0,
+            handles: 0,
+            processes: 0,
+            warned: false,
+            warned_at: 0.0,
+            reliefs: 0,
+            last_relief_at: 0.0,
+            last_relief_freed: 0,
+        }
+    }
+}
+
+/// Agregado de procesos de una misma familia (Chrome/WebView/Electron).
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct FamilyInfo {
+    pub family: String,
+    pub label: String,
+    pub count: usize,
+    pub cpu: f64,
+    pub rss: u64,
+    pub private: u64,
+    pub protected: usize,
+    pub applied: usize,
+    pub throttled: usize,
+    pub pids: Vec<u32>,
+    pub pids_truncated: bool,
+}
+
+/// Familia de un proceso según su nombre de imagen. Es una lista explícita:
+/// no se adivina por ruta ni por árbol de procesos.
+pub fn family_of(name: &str) -> Option<&'static str> {
+    let name = name.trim().to_ascii_lowercase();
+    Some(match name.as_str() {
+        "chrome.exe" | "msedge.exe" | "brave.exe" | "opera.exe" | "vivaldi.exe"
+        | "chromium.exe" | "thorium.exe" | "yandex.exe" => "chromium",
+        "msedgewebview2.exe" | "webviewhost.exe" => "webview",
+        "code.exe"
+        | "code - insiders.exe"
+        | "cursor.exe"
+        | "windsurf.exe"
+        | "discord.exe"
+        | "slack.exe"
+        | "teams.exe"
+        | "ms-teams.exe"
+        | "spotify.exe"
+        | "notion.exe"
+        | "obsidian.exe"
+        | "postman.exe"
+        | "figma.exe"
+        | "whatsapp.exe"
+        | "signal.exe"
+        | "element.exe"
+        | "bitwarden.exe"
+        | "1password.exe"
+        | "linear.exe"
+        | "loom.exe"
+        | "github desktop.exe"
+        | "gitkraken.exe"
+        | "insomnia.exe" => "electron",
+        _ => return None,
+    })
+}
+
+pub fn family_label(family: &str) -> Option<&'static str> {
+    Some(match family {
+        "chromium" => "Chrome/Edge",
+        "webview" => "WebView2",
+        "electron" => "Electron",
+        _ => return None,
+    })
+}
 
 fn now_epoch() -> f64 {
     SystemTime::now()
@@ -134,12 +277,16 @@ pub struct Engine {
     wd_last_launch: HashMap<String, Instant>,
     wd_missing: HashMap<String, Instant>,
     wd_warned: HashSet<String>,
+    pub memguard: MemGuard,
+    pub mem_pressure: MemPressure,
+    last_relief_attempt: Instant,
     pub dirty: bool,
 }
 
 impl Engine {
     pub fn new(config_path: PathBuf) -> Self {
         let config = config::load(&config_path);
+        let memguard = load_memguard(&config_path);
         let sampler = Sampler::new();
         let ncpu = sampler.ncpu();
         let admin = win::is_admin();
@@ -181,6 +328,9 @@ impl Engine {
             wd_last_launch: HashMap::new(),
             wd_missing: HashMap::new(),
             wd_warned: HashSet::new(),
+            memguard,
+            mem_pressure: MemPressure::default(),
+            last_relief_attempt: Instant::now() - Duration::from_secs(3600),
             dirty: false,
         };
         engine.profile = engine.config.profile.clone();
@@ -199,12 +349,27 @@ impl Engine {
                 }
             ),
         );
+        if engine.memguard.enabled {
+            engine.log(
+                "info",
+                format!(
+                    "MemGuard: aviso commit ≥ {:.0}% o disponible ≤ {:.0}% · alivio {}",
+                    engine.memguard.warn_commit_pct,
+                    engine.memguard.warn_available_pct,
+                    if engine.memguard.relief {
+                        "automático"
+                    } else {
+                        "manual"
+                    }
+                ),
+            );
+        }
         engine
     }
 
     pub fn save(&mut self) {
         self.config.profile = self.profile.clone();
-        if let Err(err) = config::save(&self.config_path, &self.config) {
+        if let Err(err) = save_config(&self.config_path, &self.config, &self.memguard) {
             self.log("warn", format!("no pude guardar config: {err}"));
         }
         self.dirty = false;
@@ -227,16 +392,15 @@ impl Engine {
         let started = Instant::now();
         let mut rows = self.sampler.refresh();
 
+        // Una sola copia de reglas y de la lista de protegidos por tick: antes
+        // se clonaba la lista completa de reglas por cada proceso.
+        let rules = self.config.rules.clone();
+        let protect = self.config.probalance.protect.clone();
         for row in rows.iter_mut() {
-            let rule = self.match_rule(row);
+            let rule = match_rule_fast(&rules, row, &mut self.exe_cache);
             row.rule_id = rule.as_ref().map(|r| r.id.clone());
             row.rule = rule;
-            row.protected = self
-                .config
-                .probalance
-                .protect
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(&row.name));
+            row.protected = protect.iter().any(|p| p.eq_ignore_ascii_case(&row.name));
         }
 
         let foreground = win::foreground_pid();
@@ -267,7 +431,12 @@ impl Engine {
             ram,
         });
 
-        if self.config.probalance.enabled && self.config.probalance.skip_interactive {
+        // ProBalanza necesita la lista de ventanas visibles; el watchdog de
+        // colgados también. Se calcula una sola vez por tick (antes se podían
+        // hacer dos EnumWindows idénticos).
+        let pb = &self.config.probalance;
+        let need_visible = (pb.enabled && pb.skip_interactive) || self.config.runaway.enabled;
+        if need_visible {
             self.visible = win::visible_window_pids();
         } else {
             self.visible.clear();
@@ -280,6 +449,7 @@ impl Engine {
         self.watchdog_step();
         self.runaway_step();
         self.trim_step();
+        self.memguard_step();
         self.power_step();
 
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
@@ -391,6 +561,16 @@ impl Engine {
         }
     }
 
+    /// Nombre y fecha de creación del último tick. La ficha de procesos la usa
+    /// como respaldo cuando el proceso no se deja abrir (SYSTEM, PPL) y para
+    /// fechar la instancia sin abrir un handle.
+    pub fn process_seed(&self, pid: u32) -> Option<(String, f64)> {
+        self.rows
+            .iter()
+            .find(|row| row.pid == pid)
+            .map(|row| (row.name.clone(), row.ct))
+    }
+
     pub fn process_meta(&mut self, pid: u32) -> Result<MetaRow, String> {
         let nice = win::get_priority_class(pid).ok_or("no pude leer la prioridad")?;
         let affinity = win::get_affinity(pid).unwrap_or_default();
@@ -424,42 +604,6 @@ impl Engine {
     }
 
     // ---------------------------------------------------------------- reglas
-
-    fn match_rule(&mut self, row: &ProcessRow) -> Option<Rule> {
-        let rules = self.config.rules.clone();
-        for rule in rules {
-            if !rule.enabled || rule.pattern.trim().is_empty() {
-                continue;
-            }
-            if self.rule_matches(&rule, row) {
-                return Some(rule);
-            }
-        }
-        None
-    }
-
-    fn rule_matches(&mut self, rule: &Rule, row: &ProcessRow) -> bool {
-        let pattern = rule.pattern.trim();
-        if pattern.contains('\\') || pattern.contains('/') {
-            let normalized = pattern.replace('/', "\\");
-            let base = normalized.rsplit('\\').next().unwrap_or(&normalized);
-            if !wildcard(base, &row.name) {
-                return false;
-            }
-            let mut exe = row.exe.clone();
-            if exe.is_empty() {
-                if let Some(cached) = self.exe_cache.get(&row.key()) {
-                    exe = cached.clone();
-                } else if let Some(found) = win::process_exe(row.pid) {
-                    self.exe_cache.insert(row.key(), found.clone());
-                    exe = found;
-                }
-            }
-            !exe.is_empty() && wildcard(&normalized, &exe)
-        } else {
-            wildcard(pattern, &row.name)
-        }
-    }
 
     fn apply_new_rules(&mut self) {
         let actions: Vec<(Key, u32, String, Rule)> = self
@@ -695,12 +839,12 @@ impl Engine {
     }
 
     pub fn trim(&mut self, pid: u32) -> Result<u64, String> {
-        let before = self.sampler.memory_of(pid).unwrap_or(0);
+        // Medición directa por handle. Antes se refrescaba el sampler, lo que
+        // costaba un snapshot NT completo y ensuciaba el delta de CPU del
+        // tick siguiente (los % se disparaban después de cada trim).
+        let before = win::process_memory(pid).map(|(rss, _)| rss).unwrap_or(0);
         win::trim_working_set(pid)?;
-        // El working set cambia con el trim; refrescar una vez para medir el
-        // después con datos nuevos y no reportar siempre 0.
-        let _ = self.sampler.refresh();
-        let after = self.sampler.memory_of(pid).unwrap_or(0);
+        let after = win::process_memory(pid).map(|(rss, _)| rss).unwrap_or(0);
         let freed = before.saturating_sub(after);
         self.log(
             "info",
@@ -714,6 +858,33 @@ impl Engine {
         Ok(freed)
     }
 
+    /// Recorta una lista de PIDs midiendo antes/después con
+    /// `GetProcessMemoryInfo`, sin tocar el sampler ni el historial de CPU.
+    fn trim_targets(&mut self, targets: &[(u32, u64)]) -> (u64, u32) {
+        let mut trimmed: Vec<(u32, u64)> = Vec::with_capacity(targets.len());
+        for (pid, fallback) in targets {
+            let before = win::process_memory(*pid)
+                .map(|(rss, _)| rss)
+                .unwrap_or(*fallback);
+            if win::trim_working_set(*pid).is_ok() {
+                trimmed.push((*pid, before));
+            }
+        }
+        let mut freed = 0u64;
+        let mut count = 0u32;
+        for (pid, before) in trimmed {
+            let after = win::process_memory(pid)
+                .map(|(rss, _)| rss)
+                .unwrap_or(before);
+            let delta = before.saturating_sub(after);
+            if delta > 0 {
+                freed += delta;
+                count += 1;
+            }
+        }
+        (freed, count)
+    }
+
     pub fn trim_all(&mut self) -> (u64, u32) {
         let min = (self.config.trim.min_mb as u64) * MB;
         let own = std::process::id();
@@ -724,16 +895,7 @@ impl Engine {
             .filter(|r| Some(r.pid) != self.system.foreground)
             .map(|r| (r.pid, r.rss))
             .collect();
-        let mut freed = 0u64;
-        let mut count = 0u32;
-        for (pid, _) in targets {
-            if let Ok(bytes) = self.trim(pid) {
-                if bytes > 0 {
-                    freed += bytes;
-                    count += 1;
-                }
-            }
-        }
+        let (freed, count) = self.trim_targets(&targets);
         self.last_trim = Instant::now();
         self.log(
             "info",
@@ -747,7 +909,11 @@ impl Engine {
 
     pub fn trim_background(&mut self) -> (u64, u32) {
         let fg = self.system.foreground;
-        let visible = win::visible_window_pids();
+        let visible = if self.visible.is_empty() {
+            win::visible_window_pids()
+        } else {
+            self.visible.clone()
+        };
         let own = std::process::id();
         let min = 192 * MB;
         let mut targets: Vec<(u32, u64)> = self
@@ -772,17 +938,7 @@ impl Engine {
         targets.sort_by(|a, b| b.1.cmp(&a.1));
         targets.truncate(10);
 
-        let mut freed = 0u64;
-        let mut count = 0u32;
-        for (pid, _) in targets {
-            if let Ok(bytes) = self.trim(pid) {
-                if bytes > 0 {
-                    freed += bytes;
-                    count += 1;
-                }
-            }
-        }
-        let _ = self.sampler.refresh();
+        let (freed, count) = self.trim_targets(&targets);
         self.log(
             "info",
             format!(
@@ -1348,6 +1504,330 @@ impl Engine {
         self.trim_all();
     }
 
+    // ---------------------------------------------------------------- MemGuard
+
+    /// Evalúa la presión de memoria del tick, avisa (con cooldown) y, sólo si
+    /// el usuario lo pidió, alivia working sets de fondo. Nunca termina nada.
+    fn memguard_step(&mut self) {
+        let mem = self.system.mem.clone();
+        let total = self.system.ram_total.max(1);
+        let commit_pct = if mem.commit_limit > 0 {
+            mem.commit_used as f64 / mem.commit_limit as f64 * 100.0
+        } else {
+            0.0
+        };
+        let available_pct = mem.available as f64 / total as f64 * 100.0;
+
+        let warn_commit = self.memguard.warn_commit_pct.clamp(50.0, 99.0);
+        let crit_commit = (warn_commit + 7.0).min(99.0);
+        let warn_avail = self.memguard.warn_available_pct.clamp(0.5, 40.0);
+        let crit_avail = (warn_avail * 0.5).max(0.5);
+
+        let mut reasons: Vec<String> = Vec::new();
+        let mut level = "ok";
+        if commit_pct >= crit_commit {
+            level = "critical";
+            reasons.push(format!(
+                "commit {commit_pct:.0}% (crítico ≥ {crit_commit:.0}%)"
+            ));
+        } else if commit_pct >= warn_commit {
+            level = "warn";
+            reasons.push(format!(
+                "commit {commit_pct:.0}% (aviso ≥ {warn_commit:.0}%)"
+            ));
+        }
+        if available_pct > 0.0 && available_pct <= crit_avail {
+            level = "critical";
+            reasons.push(format!("disponible {available_pct:.0}% de la RAM"));
+        } else if available_pct > 0.0 && available_pct <= warn_avail {
+            if level == "ok" {
+                level = "warn";
+            }
+            reasons.push(format!("disponible {available_pct:.0}% de la RAM"));
+        }
+
+        let previous = self.mem_pressure.level.clone();
+        let pressure = &mut self.mem_pressure;
+        pressure.level = level.to_string();
+        pressure.reasons = reasons;
+        pressure.commit_pct = (commit_pct * 10.0).round() / 10.0;
+        pressure.available_pct = (available_pct * 10.0).round() / 10.0;
+        pressure.available = mem.available;
+        pressure.commit_used = mem.commit_used;
+        pressure.commit_limit = mem.commit_limit;
+        pressure.commit_free = mem.commit_limit.saturating_sub(mem.commit_used);
+        pressure.cache = mem.cache;
+        pressure.pool_paged = mem.pool_paged;
+        pressure.pool_nonpaged = mem.pool_nonpaged;
+        pressure.handles = mem.handles;
+        pressure.processes = mem.processes;
+
+        if !self.memguard.enabled {
+            self.mem_pressure.warned = false;
+            return;
+        }
+
+        let now = now_epoch();
+        if level != "ok" {
+            let cooldown = self.memguard.warn_cooldown_s.max(30) as f64;
+            let escalated = previous != "ok" && previous != level;
+            if escalated
+                || !self.mem_pressure.warned
+                || now - self.mem_pressure.warned_at >= cooldown
+            {
+                self.mem_pressure.warned = true;
+                self.mem_pressure.warned_at = now;
+                let why = self.mem_pressure.reasons.join(" · ");
+                self.log(
+                    "warn",
+                    format!(
+                        "MemGuard: presión de memoria {level} · {why} · commit {} de {} · disponible {} · cache {}",
+                        fmt_mb(mem.commit_used),
+                        fmt_mb(mem.commit_limit),
+                        fmt_mb(mem.available),
+                        fmt_mb(mem.cache)
+                    ),
+                );
+            }
+            if self.memguard.relief {
+                let interval = self.memguard.relief_interval_s.max(60) as f64;
+                if self.last_relief_attempt.elapsed().as_secs_f64() >= interval {
+                    self.last_relief_attempt = Instant::now();
+                    let (freed, count) = self.trim_background();
+                    self.mem_pressure.reliefs = self.mem_pressure.reliefs.saturating_add(1);
+                    self.mem_pressure.last_relief_at = now;
+                    self.mem_pressure.last_relief_freed = freed;
+                    self.log(
+                        "info",
+                        format!(
+                            "MemGuard: alivio automático en {count} proceso(s) de fondo · {}",
+                            fmt_mb(freed)
+                        ),
+                    );
+                }
+            }
+        } else if previous != "ok" {
+            self.mem_pressure.warned = false;
+            self.log("info", "MemGuard: presión de memoria normalizada");
+        }
+    }
+
+    /// Ajusta los umbrales de MemGuard. Compatible con configs viejas: lo que
+    /// falta en el JSON queda como estaba.
+    pub fn set_memguard(&mut self, patch: &Value) -> Result<MemGuard, String> {
+        let cfg = &mut self.memguard;
+        if let Some(v) = patch.get("enabled").and_then(|v| v.as_bool()) {
+            cfg.enabled = v;
+        }
+        if let Some(v) = patch.get("warn_commit_pct").and_then(|v| v.as_f64()) {
+            cfg.warn_commit_pct = v.clamp(50.0, 99.0);
+        }
+        if let Some(v) = patch.get("warn_available_pct").and_then(|v| v.as_f64()) {
+            cfg.warn_available_pct = v.clamp(0.5, 40.0);
+        }
+        if let Some(v) = patch.get("relief").and_then(|v| v.as_bool()) {
+            cfg.relief = v;
+        }
+        if let Some(v) = patch.get("relief_interval_s").and_then(|v| v.as_u64()) {
+            cfg.relief_interval_s = (v as u32).clamp(60, 86_400);
+        }
+        if let Some(v) = patch.get("warn_cooldown_s").and_then(|v| v.as_u64()) {
+            cfg.warn_cooldown_s = (v as u32).clamp(60, 86_400);
+        }
+        let result = cfg.clone();
+        if !result.enabled {
+            self.mem_pressure.warned = false;
+        }
+        self.log(
+            "info",
+            format!(
+                "MemGuard {} · aviso commit ≥ {:.0}% o disponible ≤ {:.0}% · alivio {}",
+                if result.enabled { "activo" } else { "apagado" },
+                result.warn_commit_pct,
+                result.warn_available_pct,
+                if result.relief {
+                    "automático"
+                } else {
+                    "manual"
+                }
+            ),
+        );
+        self.save();
+        Ok(result)
+    }
+
+    /// Alivio manual (working sets de fondo, sin tocar ventanas visibles).
+    pub fn relief_now(&mut self) -> (u64, u32) {
+        self.last_relief_attempt = Instant::now();
+        let (freed, count) = self.trim_background();
+        self.mem_pressure.reliefs = self.mem_pressure.reliefs.saturating_add(1);
+        self.mem_pressure.last_relief_at = now_epoch();
+        self.mem_pressure.last_relief_freed = freed;
+        (freed, count)
+    }
+
+    /// Agregado por familia (Chrome/Edge, WebView2, Electron) sin alterar la
+    /// lista de procesos que ya consume la UI.
+    pub fn families(&self) -> Vec<FamilyInfo> {
+        let mut groups: HashMap<&'static str, FamilyInfo> = HashMap::new();
+        for row in &self.rows {
+            let Some(family) = family_of(&row.name) else {
+                continue;
+            };
+            let entry = groups.entry(family).or_insert_with(|| FamilyInfo {
+                family: family.to_string(),
+                label: family_label(family).unwrap_or(family).to_string(),
+                ..FamilyInfo::default()
+            });
+            entry.count += 1;
+            entry.cpu += row.cpu;
+            entry.rss += row.rss;
+            entry.private += row.private;
+            entry.protected += row.protected as usize;
+            entry.applied += row.applied as usize;
+            entry.throttled += row.pb as usize;
+            if entry.pids.len() < 256 {
+                entry.pids.push(row.pid);
+            } else {
+                entry.pids_truncated = true;
+            }
+        }
+        let mut list: Vec<FamilyInfo> = groups.into_values().collect();
+        list.sort_by(|a, b| b.rss.cmp(&a.rss).then_with(|| a.family.cmp(&b.family)));
+        for group in &mut list {
+            group.cpu = (group.cpu * 10.0).round() / 10.0;
+        }
+        list
+    }
+
+    /// Aplica una acción a todos los procesos de una familia. No termina
+    /// procesos: para eso está `/api/kill` con un PID explícito.
+    pub fn family_action(
+        &mut self,
+        family: &str,
+        action: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        let family = family.trim().to_ascii_lowercase();
+        let label = family_label(&family)
+            .ok_or_else(|| format!("familia desconocida: {family}"))?
+            .to_string();
+        let targets: Vec<(u32, String, u64)> = self
+            .rows
+            .iter()
+            .filter(|row| family_of(&row.name) == Some(family.as_str()))
+            .filter(|row| row.pid != std::process::id())
+            .map(|row| (row.pid, row.name.clone(), row.rss))
+            .collect();
+
+        let need_str = |key: &str| -> Result<String, String> {
+            body.get(key)
+                .and_then(|v| v.as_str())
+                .map(|value| value.to_string())
+                .ok_or_else(|| format!("Falta {key}"))
+        };
+
+        let mut done = 0u32;
+        let mut freed = 0u64;
+        let mut errors: Vec<String> = Vec::new();
+        match action {
+            "priority" => {
+                let cls = need_str("cls")?;
+                for (pid, name, _) in &targets {
+                    match self.set_priority(*pid, &cls) {
+                        Ok(()) => done += 1,
+                        Err(err) => push_error(&mut errors, format!("{name} (PID {pid}): {err}")),
+                    }
+                }
+            }
+            "eco" => {
+                let enabled = body
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .ok_or("Falta enabled")?;
+                for (pid, name, _) in &targets {
+                    match self.set_eco(*pid, enabled) {
+                        Ok(()) => done += 1,
+                        Err(err) => push_error(&mut errors, format!("{name} (PID {pid}): {err}")),
+                    }
+                }
+            }
+            "io" => {
+                let level = need_str("level")?;
+                for (pid, name, _) in &targets {
+                    match self.set_io(*pid, &level) {
+                        Ok(()) => done += 1,
+                        Err(err) => push_error(&mut errors, format!("{name} (PID {pid}): {err}")),
+                    }
+                }
+            }
+            "mem" => {
+                let level = need_str("level")?;
+                for (pid, name, _) in &targets {
+                    match self.set_memory_priority(*pid, &level) {
+                        Ok(()) => done += 1,
+                        Err(err) => push_error(&mut errors, format!("{name} (PID {pid}): {err}")),
+                    }
+                }
+            }
+            "affinity" => {
+                let cpus: Vec<u32> = body
+                    .get("cpus")
+                    .and_then(|v| v.as_array())
+                    .ok_or("Falta cpus")?
+                    .iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u32))
+                    .collect();
+                if cpus.is_empty() {
+                    return Err("Falta cpus".into());
+                }
+                for (pid, name, _) in &targets {
+                    match self.set_affinity(*pid, &cpus) {
+                        Ok(()) => done += 1,
+                        Err(err) => push_error(&mut errors, format!("{name} (PID {pid}): {err}")),
+                    }
+                }
+            }
+            "restore" => {
+                for (pid, name, _) in &targets {
+                    match self.restore(*pid) {
+                        Ok(()) => done += 1,
+                        Err(err) => push_error(&mut errors, format!("{name} (PID {pid}): {err}")),
+                    }
+                }
+            }
+            "trim" => {
+                let list: Vec<(u32, u64)> = targets
+                    .iter()
+                    .map(|(pid, _, rss)| (*pid, *rss))
+                    .collect();
+                let (bytes, count) = self.trim_targets(&list);
+                freed = bytes;
+                done = count;
+            }
+            other => {
+                return Err(format!(
+                    "acción de familia no soportada: {other} (priority, eco, io, mem, affinity, trim, restore)"
+                ))
+            }
+        }
+
+        if targets.is_empty() {
+            return Ok(json!({
+                "ok": true, "family": family, "label": label, "action": action,
+                "count": 0, "freed": 0, "errors": [], "note": "no hay procesos de esa familia"
+            }));
+        }
+        self.log(
+            "info",
+            format!("familia {label}: {action} aplicado a {done} proceso(s)"),
+        );
+        Ok(json!({
+            "ok": true, "family": family, "label": label, "action": action,
+            "count": done, "freed": freed, "errors": errors
+        }))
+    }
+
     // ---------------------------------------------------------------- energía
 
     pub fn refresh_plans(&mut self) {
@@ -1854,6 +2334,65 @@ impl Engine {
         }
     }
 
+    /// Snapshot serializado con los agregados nuevos. La forma existente no
+    /// cambia: sólo se agregan claves (`memguard`, `mem_pressure`, `families`
+    /// y `processes[].family`), así que las UIs viejas siguen funcionando.
+    pub fn state_json(&mut self) -> Value {
+        let snapshot = self.snapshot();
+        let mut value = json!(snapshot);
+        if let Some(map) = value.as_object_mut() {
+            map.insert("memguard".into(), json!(self.memguard));
+            map.insert("mem_pressure".into(), json!(self.mem_pressure));
+            map.insert("families".into(), json!(self.families()));
+            if let Some(processes) = map.get_mut("processes").and_then(|v| v.as_array_mut()) {
+                for process in processes {
+                    let Some(entry) = process.as_object_mut() else {
+                        continue;
+                    };
+                    let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(family) = family_of(name) {
+                        entry.insert("family".into(), json!(family));
+                    }
+                }
+            }
+        }
+        value
+    }
+
+    /// Informe de memoria para `/api/mem`: presión, umbrales, composición y
+    /// mayores consumidores por memoria privada.
+    pub fn mem_report(&self) -> Value {
+        let mut rows: Vec<&ProcessRow> = self.rows.iter().collect();
+        rows.sort_by(|a, b| b.private.cmp(&a.private).then_with(|| a.pid.cmp(&b.pid)));
+        let top: Vec<Value> = rows
+            .into_iter()
+            .take(10)
+            .map(|row| {
+                json!({
+                    "pid": row.pid,
+                    "name": row.name,
+                    "family": family_of(&row.name),
+                    "rss": row.rss,
+                    "private": row.private,
+                    "cpu": row.cpu,
+                })
+            })
+            .collect();
+        json!({
+            "ok": true,
+            "memguard": self.memguard,
+            "pressure": self.mem_pressure,
+            "system": {
+                "ram": self.system.ram,
+                "ram_used": self.system.ram_used,
+                "ram_total": self.system.ram_total,
+                "mem": self.system.mem,
+            },
+            "families": self.families(),
+            "top_private": top,
+        })
+    }
+
     fn tick_stats(&self) -> TickStats {
         if self.tick_ms.is_empty() {
             return TickStats {
@@ -2055,4 +2594,100 @@ fn rule_matches_plain(rule: &Rule, row: &ProcessRow) -> bool {
     } else {
         wildcard(pattern, &row.name)
     }
+}
+
+/// Primera regla habilitada que matchea la fila. Recibe la lista ya copiada
+/// una vez por tick: antes se clonaba la lista completa por cada proceso y
+/// sólo hacía falta clonar la regla ganadora.
+fn match_rule_fast(
+    rules: &[Rule],
+    row: &ProcessRow,
+    exe_cache: &mut HashMap<Key, String>,
+) -> Option<Rule> {
+    for rule in rules {
+        if !rule.enabled || rule.pattern.trim().is_empty() {
+            continue;
+        }
+        if rule_matches_cached(rule, row, exe_cache) {
+            return Some(rule.clone());
+        }
+    }
+    None
+}
+
+fn rule_matches_cached(
+    rule: &Rule,
+    row: &ProcessRow,
+    exe_cache: &mut HashMap<Key, String>,
+) -> bool {
+    let pattern = rule.pattern.trim();
+    if pattern.contains('\\') || pattern.contains('/') {
+        let normalized = pattern.replace('/', "\\");
+        let base = normalized.rsplit('\\').next().unwrap_or(&normalized);
+        if !wildcard(base, &row.name) {
+            return false;
+        }
+        let mut exe = row.exe.clone();
+        if exe.is_empty() {
+            if let Some(cached) = exe_cache.get(&row.key()) {
+                exe = cached.clone();
+            } else if let Some(found) = win::process_exe(row.pid) {
+                exe_cache.insert(row.key(), found.clone());
+                exe = found;
+            }
+        }
+        !exe.is_empty() && wildcard(&normalized, &exe)
+    } else {
+        wildcard(pattern, &row.name)
+    }
+}
+
+fn push_error(errors: &mut Vec<String>, message: String) {
+    if errors.len() < 5 {
+        errors.push(message);
+    }
+}
+
+/// Lee la sección `memguard` del config. Si no existe (configs viejas) o está
+/// malformada, se usan los valores por defecto.
+fn load_memguard(path: &Path) -> MemGuard {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return MemGuard::default();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return MemGuard::default();
+    };
+    value
+        .get("memguard")
+        .and_then(|section| serde_json::from_value::<MemGuard>(section.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Guarda `config` + `memguard` en un único archivo, preservando claves
+/// desconocidas que ya estuvieran en el JSON (configs de versiones futuras).
+fn save_config(path: &Path, config: &Config, memguard: &MemGuard) -> Result<(), String> {
+    let mut value = serde_json::to_value(config).map_err(|err| err.to_string())?;
+    let Some(map) = value.as_object_mut() else {
+        return Err("el config no es un objeto JSON".into());
+    };
+    map.insert(
+        "memguard".into(),
+        serde_json::to_value(memguard).map_err(|err| err.to_string())?,
+    );
+    if let Ok(previous) = std::fs::read_to_string(path) {
+        if let Ok(Value::Object(old)) = serde_json::from_str::<Value>(&previous) {
+            for (key, old_value) in old {
+                map.entry(key).or_insert(old_value);
+            }
+        }
+    }
+    let text = serde_json::to_string_pretty(&value).map_err(|err| err.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("no pude crear {parent:?}: {err}"))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text).map_err(|err| format!("no pude escribir config: {err}"))?;
+    std::fs::rename(&tmp, path).map_err(|err| format!("no pude reemplazar config: {err}"))?;
+    Ok(())
 }
