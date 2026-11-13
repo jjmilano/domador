@@ -56,11 +56,42 @@ fn main() {
 
 fn run_server(port: u16, open: bool) -> Result<(), String> {
     let config_path = config::default_path();
+    // Un solo motor por config: dos motores con el mismo config.json se pisan
+    // los cambios al guardar (QA A2). Si ya hay uno, se reusa.
+    let _instance = match win::single_instance(&config_path.display().to_string()) {
+        Some(guard) => guard,
+        None => {
+            println!("Domador ya está corriendo con este config; abro la UI contra ese motor.");
+            if open {
+                open_ui(port, &format!("http://127.0.0.1:{port}/"));
+            }
+            return Ok(());
+        }
+    };
     let engine = Arc::new(Mutex::new(engine::Engine::new(config_path.clone())));
     {
         let mut guard = lock(&engine);
         guard.tick();
     }
+
+    // GPU (nvidia-smi) y planes (powercfg) se consultan fuera del lock: antes
+    // corrían dentro de /api/state y frenaban a todos los endpoints (QA A1).
+    lock(&engine).use_external_probes();
+    let probe_engine = engine.clone();
+    thread::spawn(move || {
+        let mut tick: u64 = 0;
+        loop {
+            let gpu = domador::gpu::query();
+            lock(&probe_engine).set_gpu(gpu);
+            if tick % 12 == 0 {
+                let listed = domador::power::list_plans();
+                let active = domador::power::active_plan();
+                lock(&probe_engine).apply_plans(listed, active);
+            }
+            tick += 1;
+            thread::sleep(Duration::from_secs(5));
+        }
+    });
 
     let tick_engine = engine.clone();
     thread::spawn(move || loop {
@@ -87,7 +118,7 @@ fn run_server(port: u16, open: bool) -> Result<(), String> {
     });
 
     if open {
-        open_ui(&url);
+        open_ui(actual_port, &url);
     }
 
     loop {
@@ -95,12 +126,19 @@ fn run_server(port: u16, open: bool) -> Result<(), String> {
     }
 }
 
-fn open_ui(url: &str) {
+fn open_ui(port: u16, url: &str) {
     // Preferir la UI nativa; el navegador queda como fallback de desarrollo.
+    // La UI recibe el puerto real: si 8787 estaba ocupado, el motor cae al
+    // siguiente y antes la UI no lo encontraba (QA A7).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let ui = dir.join("domador-ui.exe");
-            if ui.exists() && Command::new(ui).spawn().is_ok() {
+            if ui.exists()
+                && Command::new(ui)
+                    .env("DOMADOR_PORT", port.to_string())
+                    .spawn()
+                    .is_ok()
+            {
                 return;
             }
         }

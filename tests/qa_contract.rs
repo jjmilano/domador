@@ -159,12 +159,9 @@ fn body_cap_con_content_length_es_413() {
     let _ = fs::remove_file(config);
 }
 
-/// BUG conocido (QA v2): el tope de 64 KiB sólo se aplica si el cliente manda
-/// Content-Length. Con `Transfer-Encoding: chunked` el cuerpo se trunca a
-/// 64 KiB y el JSON parcial devuelve 400 "JSON inválido" en vez de 413.
-/// Cuando se arregle, sacar `#[ignore]`.
+/// QA v2 A3 (resuelto): el tope de 64 KiB también aplica a cuerpos
+/// `Transfer-Encoding: chunked`; se lee un byte de más y sobra → 413.
 #[test]
-#[ignore = "bug conocido: cuerpo chunked > 64 KiB devuelve 400 en vez de 413"]
 fn body_cap_chunked_deberia_ser_413() {
     let (base, _engine, config) = start("chunked");
     let payload = format!("{{\"pad\":\"{}\"}}", "a".repeat(200 * 1024));

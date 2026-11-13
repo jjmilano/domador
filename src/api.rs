@@ -401,8 +401,12 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, ApiError
                 .and_then(|v| v.as_array())
                 .ok_or("Falta cpus")?
                 .iter()
-                .filter_map(|v| v.as_u64().map(|n| n as u32))
-                .collect();
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or("cpus debe ser una lista de enteros")
+                })
+                .collect::<Result<_, _>>()?;
             lock(engine).set_affinity(pid, &cpus)?;
             Ok(json!({"ok": true, "cpus": cpus}))
         }
@@ -453,16 +457,24 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, ApiError
             let cfg = lock(engine).set_runaway(body)?;
             Ok(json!({"ok": true, "runaway": cfg}))
         }
+        // Los trims eligen candidatos con el lock y liberan memoria sin él:
+        // antes un alivio de ~450 ms congelaba /api/state (QA A6).
         "/api/trim-all" => {
-            let (freed, count) = lock(engine).trim_all();
+            let targets = lock(engine).trim_all_targets();
+            let (freed, count) = crate::engine::trim_pids(&targets);
+            lock(engine).record_trim("all", freed, count);
             Ok(json!({"ok": true, "freed": freed, "count": count}))
         }
         "/api/trim-idle" => {
-            let (freed, count) = lock(engine).trim_background();
+            let targets = lock(engine).background_targets();
+            let (freed, count) = crate::engine::trim_pids(&targets);
+            lock(engine).record_trim("idle", freed, count);
             Ok(json!({"ok": true, "freed": freed, "count": count}))
         }
         "/api/mem/relief" => {
-            let (freed, count) = lock(engine).relief_now();
+            let targets = lock(engine).background_targets();
+            let (freed, count) = crate::engine::trim_pids(&targets);
+            lock(engine).record_trim("relief", freed, count);
             Ok(json!({"ok": true, "freed": freed, "count": count}))
         }
         "/api/memguard" => {

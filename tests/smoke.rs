@@ -88,7 +88,8 @@ fn rules_persist_and_validate() {
 
 #[test]
 fn api_roundtrip_and_auth() {
-    let engine = Arc::new(Mutex::new(Engine::new(temp_config("api"))));
+    let config = temp_config("api");
+    let engine = Arc::new(Mutex::new(Engine::new(config.clone())));
     engine.lock().unwrap().tick();
     let port = api::serve(engine.clone(), 0).expect("servidor");
     let base = format!("http://127.0.0.1:{port}");
@@ -151,8 +152,33 @@ fn api_roundtrip_and_auth() {
         .send_json(json!({"pid": pid}))
         .expect("restore");
 
+    // QA A5: `hist` ya no viaja en el payload.
+    assert!(state["processes"][0].get("hist").is_none());
+
+    // QA A9: tipos inválidos en cpus no se confunden con lista vacía.
+    let bad_affinity = ureq::post(&format!("{base}/api/affinity"))
+        .set("X-Domador", "1")
+        .send_json(json!({"pid": pid, "cpus": ["0", "1"]}));
+    match bad_affinity {
+        Err(ureq::Error::Status(400, resp)) => {
+            let body: Value = resp.into_json().expect("json");
+            assert!(body["error"].as_str().unwrap().contains("enteros"));
+        }
+        other => panic!("se esperaba 400, llegó {other:?}"),
+    }
+
+    // QA A4: Juego sin target no adivina ni cambia el plan de energía.
+    let gaming = ureq::post(&format!("{base}/api/profile"))
+        .set("X-Domador", "1")
+        .send_json(json!({"name": "gaming"}));
+    match gaming {
+        Err(ureq::Error::Status(code, _)) => assert_eq!(code, 400),
+        other => panic!("gaming sin target debería fallar, llegó {other:?}"),
+    }
+
     let _ = child.kill();
     let _ = child.wait();
+    let _ = fs::remove_file(config);
 }
 
 #[test]

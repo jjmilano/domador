@@ -292,6 +292,9 @@ pub struct ProcessRow {
     pub name: String,
     pub exe: String,
     pub cpu: f64,
+    /// Historia corta de CPU para ProBalance. No viaja en `/api/state`: era
+    /// ~25% del payload y ninguna UI la usa (QA A5).
+    #[serde(skip_serializing, default)]
     pub hist: Vec<f32>,
     pub rss: u64,
     pub private: u64,

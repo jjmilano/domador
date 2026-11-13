@@ -1933,3 +1933,47 @@ mod detail_tests {
         );
     }
 }
+
+/// Mutex con nombre que marca "ya hay un motor con este config".
+/// Se libera al soltar el guard (o al morir el proceso).
+pub struct InstanceGuard(HANDLE);
+
+// El handle sólo se usa para cerrarlo; no hay acceso concurrente.
+unsafe impl Send for InstanceGuard {}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+/// Devuelve `None` si otro proceso ya tomó la instancia para `key`
+/// (normalmente la ruta del config). El nombre usa un hash para no depender de
+/// caracteres raros en la ruta.
+pub fn single_instance(key: &str) -> Option<InstanceGuard> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.to_lowercase().bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    let name: Vec<u16> = format!("Local\\DomadorEngine-{hash:016x}")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        let handle = CreateMutexW(ptr::null(), TRUE, name.as_ptr());
+        if handle.is_null() {
+            // Sin mutex no bloqueamos el arranque: mejor un motor que ninguno.
+            return Some(InstanceGuard(handle));
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(handle);
+            return None;
+        }
+        Some(InstanceGuard(handle))
+    }
+}

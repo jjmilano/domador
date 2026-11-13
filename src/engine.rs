@@ -264,6 +264,14 @@ pub struct Engine {
     profile_applied: Vec<u32>,
     gpu: GpuInfo,
     gpu_at: Instant,
+    /// Con `true`, GPU y planes de energía los refresca un hilo aparte
+    /// (`spawn_probes`) y `snapshot()` sólo lee el cache: nunca se lanza
+    /// `nvidia-smi` ni PowerShell con el lock del motor tomado.
+    external_probes: bool,
+    /// Última app en primer plano que no es Domador ni el shell: es el
+    /// candidato para "Juego" cuando se pide `target: "auto"`. Sin esto, al
+    /// apretar Juego desde la UI el "juego" era la propia UI.
+    last_app_fg: Option<String>,
     started: Instant,
     tick_ms: VecDeque<f64>,
     last_tick_ms: f64,
@@ -315,6 +323,8 @@ impl Engine {
             profile_applied: Vec::new(),
             gpu: GpuInfo::default(),
             gpu_at: Instant::now() - Duration::from_secs(60),
+            external_probes: false,
+            last_app_fg: None,
             started: Instant::now(),
             tick_ms: VecDeque::with_capacity(180),
             last_tick_ms: 0.0,
@@ -409,6 +419,21 @@ impl Engine {
         let (cpu, percpu, used, total, ram) = self.sampler.system();
         let foreground_name =
             foreground.and_then(|pid| rows.iter().find(|r| r.pid == pid).map(|r| r.name.clone()));
+        if let Some(name) = &foreground_name {
+            let lower = name.to_ascii_lowercase();
+            let own = lower.starts_with("domador")
+                || matches!(
+                    lower.as_str(),
+                    "explorer.exe"
+                        | "searchhost.exe"
+                        | "startmenuexperiencehost.exe"
+                        | "shellexperiencehost.exe"
+                        | "applicationframehost.exe"
+                );
+            if !own {
+                self.last_app_fg = Some(name.clone());
+            }
+        }
 
         self.rows = rows;
         self.system = SystemInfo {
@@ -861,53 +886,24 @@ impl Engine {
     /// Recorta una lista de PIDs midiendo antes/después con
     /// `GetProcessMemoryInfo`, sin tocar el sampler ni el historial de CPU.
     fn trim_targets(&mut self, targets: &[(u32, u64)]) -> (u64, u32) {
-        let mut trimmed: Vec<(u32, u64)> = Vec::with_capacity(targets.len());
-        for (pid, fallback) in targets {
-            let before = win::process_memory(*pid)
-                .map(|(rss, _)| rss)
-                .unwrap_or(*fallback);
-            if win::trim_working_set(*pid).is_ok() {
-                trimmed.push((*pid, before));
-            }
-        }
-        let mut freed = 0u64;
-        let mut count = 0u32;
-        for (pid, before) in trimmed {
-            let after = win::process_memory(pid)
-                .map(|(rss, _)| rss)
-                .unwrap_or(before);
-            let delta = before.saturating_sub(after);
-            if delta > 0 {
-                freed += delta;
-                count += 1;
-            }
-        }
-        (freed, count)
+        trim_pids(targets)
     }
 
-    pub fn trim_all(&mut self) -> (u64, u32) {
+    /// Candidatos de SmartTrim manual. Se calculan con el lock tomado y el
+    /// trim real se hace afuera (`trim_pids`) para no frenar la API (QA A6).
+    pub fn trim_all_targets(&self) -> Vec<(u32, u64)> {
         let min = (self.config.trim.min_mb as u64) * MB;
         let own = std::process::id();
-        let targets: Vec<(u32, u64)> = self
-            .rows
+        self.rows
             .iter()
             .filter(|r| r.rss >= min && r.pid != own && !r.protected)
             .filter(|r| Some(r.pid) != self.system.foreground)
             .map(|r| (r.pid, r.rss))
-            .collect();
-        let (freed, count) = self.trim_targets(&targets);
-        self.last_trim = Instant::now();
-        self.log(
-            "info",
-            format!(
-                "SmartTrim: {} liberados en {count} proceso(s)",
-                fmt_mb(freed)
-            ),
-        );
-        (freed, count)
+            .collect()
     }
 
-    pub fn trim_background(&mut self) -> (u64, u32) {
+    /// Candidatos del alivio conservador: fondo, sin ventana, CPU baja.
+    pub fn background_targets(&self) -> Vec<(u32, u64)> {
         let fg = self.system.foreground;
         let visible = if self.visible.is_empty() {
             win::visible_window_pids()
@@ -937,15 +933,85 @@ impl Engine {
             .collect();
         targets.sort_by(|a, b| b.1.cmp(&a.1));
         targets.truncate(10);
+        targets
+    }
 
-        let (freed, count) = self.trim_targets(&targets);
-        self.log(
-            "info",
-            format!(
-                "Alivio de memoria: {} liberados en {count} proceso(s) de fondo",
-                fmt_mb(freed)
+    /// Registra en el log/estado un trim hecho fuera del lock.
+    pub fn record_trim(&mut self, kind: &str, freed: u64, count: u32) {
+        match kind {
+            "all" => {
+                self.last_trim = Instant::now();
+                self.log(
+                    "info",
+                    format!(
+                        "SmartTrim: {} liberados en {count} proceso(s)",
+                        fmt_mb(freed)
+                    ),
+                );
+            }
+            "relief" => {
+                self.last_relief_attempt = Instant::now();
+                self.mem_pressure.reliefs = self.mem_pressure.reliefs.saturating_add(1);
+                self.mem_pressure.last_relief_at = now_epoch();
+                self.mem_pressure.last_relief_freed = freed;
+                self.log(
+                    "info",
+                    format!(
+                        "Alivio de memoria: {} liberados en {count} proceso(s) de fondo",
+                        fmt_mb(freed)
+                    ),
+                );
+            }
+            _ => self.log(
+                "info",
+                format!(
+                    "Alivio de memoria: {} liberados en {count} proceso(s) de fondo",
+                    fmt_mb(freed)
+                ),
             ),
-        );
+        }
+    }
+}
+
+/// Libera el working set de cada PID y mide cuánto bajó. No toca el motor:
+/// se puede llamar sin el lock.
+pub fn trim_pids(targets: &[(u32, u64)]) -> (u64, u32) {
+    let mut trimmed: Vec<(u32, u64)> = Vec::with_capacity(targets.len());
+    for (pid, fallback) in targets {
+        let before = win::process_memory(*pid)
+            .map(|(rss, _)| rss)
+            .unwrap_or(*fallback);
+        if win::trim_working_set(*pid).is_ok() {
+            trimmed.push((*pid, before));
+        }
+    }
+    let mut freed = 0u64;
+    let mut count = 0u32;
+    for (pid, before) in trimmed {
+        let after = win::process_memory(pid)
+            .map(|(rss, _)| rss)
+            .unwrap_or(before);
+        let delta = before.saturating_sub(after);
+        if delta > 0 {
+            freed += delta;
+            count += 1;
+        }
+    }
+    (freed, count)
+}
+
+impl Engine {
+    pub fn trim_all(&mut self) -> (u64, u32) {
+        let targets = self.trim_all_targets();
+        let (freed, count) = self.trim_targets(&targets);
+        self.record_trim("all", freed, count);
+        (freed, count)
+    }
+
+    pub fn trim_background(&mut self) -> (u64, u32) {
+        let targets = self.background_targets();
+        let (freed, count) = self.trim_targets(&targets);
+        self.record_trim("idle", freed, count);
         (freed, count)
     }
 
@@ -1658,11 +1724,9 @@ impl Engine {
 
     /// Alivio manual (working sets de fondo, sin tocar ventanas visibles).
     pub fn relief_now(&mut self) -> (u64, u32) {
-        self.last_relief_attempt = Instant::now();
-        let (freed, count) = self.trim_background();
-        self.mem_pressure.reliefs = self.mem_pressure.reliefs.saturating_add(1);
-        self.mem_pressure.last_relief_at = now_epoch();
-        self.mem_pressure.last_relief_freed = freed;
+        let targets = self.background_targets();
+        let (freed, count) = self.trim_targets(&targets);
+        self.record_trim("relief", freed, count);
         (freed, count)
     }
 
@@ -1831,11 +1895,18 @@ impl Engine {
     // ---------------------------------------------------------------- energía
 
     pub fn refresh_plans(&mut self) {
-        match power::list_plans() {
+        let listed = power::list_plans();
+        let active = power::active_plan();
+        self.apply_plans(listed, active);
+    }
+
+    /// Aplica una lectura de planes hecha fuera del lock.
+    pub fn apply_plans(&mut self, listed: Result<Vec<PowerPlan>, String>, active: Option<String>) {
+        match listed {
             Ok(plans) => {
                 self.plans = plans;
-                self.active_plan = power::active_plan()
-                    .or_else(|| self.plans.iter().find(|p| p.active).map(|p| p.guid.clone()));
+                self.active_plan =
+                    active.or_else(|| self.plans.iter().find(|p| p.active).map(|p| p.guid.clone()));
                 if self.profile.plan.is_empty() {
                     if let Some(active) = &self.active_plan {
                         if let Some(plan) = self.plans.iter().find(|p| &p.guid == active) {
@@ -1951,9 +2022,16 @@ impl Engine {
                 self.log("info", format!("perfil: Full Power · {plan}"));
             }
             "gaming" => {
-                let target = target
-                    .or_else(|| self.system.foreground_name.clone())
-                    .ok_or("Elegí el ejecutable del juego")?;
+                // Sin target explícito no se adivina: cambiar el plan de
+                // energía global por la ventana que justo tenía foco era un
+                // efecto lateral peligroso (QA A4). "auto" pide a propósito la
+                // última app usada que no sea Domador.
+                let target = match target.as_deref().map(str::trim) {
+                    Some("auto") => self.last_app_fg.clone(),
+                    Some("") | None => None,
+                    Some(_) => target,
+                }
+                .ok_or("Elegí el ejecutable del juego")?;
                 let previous = if self.profile.active == "balanced" {
                     self.active_plan.clone().unwrap_or_default()
                 } else {
@@ -2269,8 +2347,18 @@ impl Engine {
 
     // ---------------------------------------------------------------- estado
 
+    /// Pasa la consulta de GPU y planes a un hilo propio (ver `spawn_probes`).
+    pub fn use_external_probes(&mut self) {
+        self.external_probes = true;
+    }
+
+    pub fn set_gpu(&mut self, gpu: GpuInfo) {
+        self.gpu = gpu;
+        self.gpu_at = Instant::now();
+    }
+
     pub fn snapshot(&mut self) -> Snapshot {
-        if self.last_plan_scan.elapsed().as_secs_f64() > 60.0 {
+        if !self.external_probes && self.last_plan_scan.elapsed().as_secs_f64() > 60.0 {
             self.refresh_plans();
         }
         let applied_keys: KeySet = self.applied.keys().copied().collect();
@@ -2285,7 +2373,7 @@ impl Engine {
             .and_then(|guid| self.plans.iter().find(|p| &p.guid == guid))
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        if self.gpu_at.elapsed().as_secs_f64() > 5.0 {
+        if !self.external_probes && self.gpu_at.elapsed().as_secs_f64() > 5.0 {
             self.gpu = crate::gpu::query();
             self.gpu_at = Instant::now();
         }

@@ -444,7 +444,9 @@ fn poll_thread(shared: Arc<Mutex<Shared>>) {
     loop {
         let result = get_state();
         store_state(&shared, result);
-        thread::sleep(Duration::from_millis(700));
+        // 1 s alcanza para una tabla de procesos y baja a la mitad el JSON
+        // que se mueve por segundo.
+        thread::sleep(Duration::from_millis(1000));
     }
 }
 
@@ -1892,7 +1894,13 @@ impl DomadorUi {
             "ai" => "Activando modo IA",
             _ => "Equilibrando",
         };
-        self.action("/api/profile", json!({ "name": name }), busy, label);
+        let body = if name == "gaming" {
+            // El motor recuerda la última app usada que no es Domador.
+            json!({ "name": name, "target": "auto" })
+        } else {
+            json!({ "name": name })
+        };
+        self.action("/api/profile", body, busy, label);
     }
 
     fn set_sort(&mut self, key: SortBy) {
