@@ -6,6 +6,10 @@ rust-version = "1.88"
 license = "MIT"
 description = "Control de procesos y rendimiento para Windows, en Rust"
 
+[[bin]]
+name = "domador-tray"
+path = "src/bin/tray.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,6 +21,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
     "Win32_System_Power",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 sysinfo = "0.33"

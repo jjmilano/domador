@@ -16,9 +16,9 @@ Domador hace lo mismo (y algunas cosas más) con el código a la vista: reglas p
 
 ## Estado
 
-v0.4, usable y probado en Windows 11. El motor Rust, la UI web, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP, snapshot NT y parsing de `powercfg` (6/6). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
+v0.4, usable y probado en Windows 11. El motor Rust, la UI web, el servidor de bandeja, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP, snapshot NT y parsing de `powercfg` (6/6). El binario release pesa **2,0 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
 
-Lo que falta está en el roadmap: icono de bandeja, servicio elevado para procesos protegidos y CPU sets. Nada de eso impide usarlo hoy.
+Lo que falta está en el roadmap: servicio elevado para procesos protegidos y CPU sets. Nada de eso impide usarlo hoy.
 
 ## Características
 
@@ -74,6 +74,7 @@ Perfiles listos para usar, cada uno con su combinación de plan de energía, Pro
 
 - `domador serve` levanta un servidor HTTP en `127.0.0.1` (puerto 8787 por defecto, `--port` para cambiarlo) que sirve la UI web y la API JSON.
 - `domador mcp` expone las mismas operaciones como servidor MCP por stdio, así un agente (Claude, Codex, Hermes) puede leer el estado, aplicar reglas y cambiar de perfil con herramientas normales. Es un proxy: **requiere que `domador serve` esté corriendo** en el mismo puerto (8787 por defecto).
+- `domador-tray` deja un icono en la bandeja del sistema. El motor corre aparte: cerrar la ventana de Edge no lo apaga. Menú: Abrir Domador, Abrir carpeta, Salir.
 - La UI es HTML/JS plano sin build: tabla de procesos, reglas, actividad del motor, ajustes y medidores por núcleo.
 
 ## Seguridad
@@ -221,7 +222,6 @@ El motor corre en un hilo propio y publica un snapshot que la API serializa; los
 
 ## Roadmap
 
-- [ ] Icono de bandeja con menú rápido y perfiles
 - [ ] Servicio elevado (para aplicar reglas antes del login y a procesos protegidos)
 - [ ] CPU sets en lugar de sólo máscaras de afinidad
 - [ ] Instalador MSI con actualización limpia
