@@ -341,20 +341,85 @@ fn post(path: &'static str, body: Value) -> Result<Value, String> {
 
 fn ensure_server() {
     let addr = SocketAddr::from(([127, 0, 0, 1], port()));
-    if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
+    let alive = TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok();
+    if alive {
+        // Si la UI ya es elevada pero el motor quedó viejo y sin admin, hay
+        // que reiniciarlo: el token no se puede "ascender" en caliente.
+        if domador::win::is_admin() && !engine_is_admin() {
+            let _ = post("/api/shutdown", json!({}));
+            thread::sleep(Duration::from_millis(800));
+            spawn_engine();
+            wait_for_engine(&addr);
+        }
         return;
     }
-    let exe = std::env::current_exe()
+    spawn_engine();
+    wait_for_engine(&addr);
+}
+
+fn engine_is_admin() -> bool {
+    get_state()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("domador.exe")));
-    if let Some(exe) = exe {
+        .and_then(|state| state.pointer("/app/admin").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+fn engine_exe() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("domador.exe")))
+}
+
+fn spawn_engine() {
+    if let Some(exe) = engine_exe() {
         let _ = Command::new(exe)
             .args(["run", "--no-open"])
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
-    for _ in 0..30 {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+}
+
+fn spawn_engine_elevated() {
+    if let Some(exe) = engine_exe() {
+        let _ = shell_runas(&exe.to_string_lossy(), "run --no-open");
+    }
+}
+
+fn relaunch_ui_admin() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = shell_runas(&exe.to_string_lossy(), "");
+    }
+}
+
+/// `ShellExecuteW(..., "runas")` es más confiable que un PowerShell oculto:
+/// el UAC aparece asociado a la app y no queda un proceso intermedio colgado.
+fn shell_runas(exe: &str, args: &str) -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+    fn wide(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain(Some(0)).collect()
+    }
+    let operation = wide("runas");
+    let file = wide(exe);
+    let params = wide(args);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    result as isize > 32
+}
+
+fn wait_for_engine(addr: &SocketAddr) {
+    for _ in 0..40 {
+        if TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok() {
             return;
         }
         thread::sleep(Duration::from_millis(200));
@@ -1830,20 +1895,16 @@ impl DomadorUi {
     }
 
     fn relaunch_admin(&self) {
-        // Parar el motor primero: si sigue vivo, la UI elevada se conecta al
-        // mismo servidor sin privilegios y el badge no cambia.
+        // Reiniciar el MOTOR, no la UI: el motor es quien necesita el token
+        // elevado para hablar con el EC. La UI elevada se queda abierta y
+        // vuelve a consultar el estado en el próximo poll.
         let _ = post("/api/shutdown", json!({}));
         thread::sleep(Duration::from_millis(800));
-        let exe = std::env::current_exe().unwrap_or_default();
-        let exe = exe.to_string_lossy().replace('\'', "''");
-        let _ = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!("Start-Process -FilePath '{exe}' -Verb RunAs"),
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        if domador::win::is_admin() {
+            spawn_engine();
+        } else {
+            spawn_engine_elevated();
+        }
     }
 
     // ------------------------------------------------------------- shell ---
@@ -7136,6 +7197,12 @@ fn icon() -> Option<Arc<egui::IconData>> {
 }
 
 fn main() -> eframe::Result<()> {
+    // Domador es una herramienta de administración: por defecto abre con UAC.
+    // `DOMADOR_NO_ELEVATE=1` queda sólo para pruebas automatizadas.
+    if !domador::win::is_admin() && std::env::var_os("DOMADOR_NO_ELEVATE").is_none() {
+        relaunch_ui_admin();
+        return Ok(());
+    }
     ensure_server();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Domador")
