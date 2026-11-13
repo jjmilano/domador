@@ -3491,7 +3491,24 @@ impl DomadorUi {
                 ));
             });
         }
+        if let Some(view) = view.as_ref() {
+            if !view.warnings.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "Lecturas limitadas por el BIOS: {}",
+                            view.warnings.join(" · ")
+                        ))
+                        .size(9.5)
+                        .color(FAINT),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+            }
+        }
         ui.add_space(12.0);
+        hardware_guide(ui);
 
         // Avisos: primero lo que bloquea, después lo que informa.
         if !motor {
@@ -3580,16 +3597,21 @@ impl DomadorUi {
         }
         let enabled = !busy && admin && view.available;
 
+        let fans_ready = view.fans.iter().any(|fan| fan.rpm > 0 || fan.max > 0);
+        let curve_ready = view.table.len() >= 10;
         if width >= 760.0 {
             let col = ((width - 12.0) / 2.0).floor();
             ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
                 ui.allocate_ui_with_layout(
                     Vec2::new(col, 0.0),
                     egui::Layout::top_down(Align::Min),
                     |ui| {
                         legion_thermal_card(ui, col, view, &mut intents, enabled);
-                        ui.add_space(12.0);
-                        legion_fans_card(ui, col, view, &mut intents, enabled);
+                        if fans_ready {
+                            ui.add_space(12.0);
+                            legion_fans_card(ui, col, view, &mut intents, enabled);
+                        }
                     },
                 );
                 ui.add_space(12.0);
@@ -3603,21 +3625,25 @@ impl DomadorUi {
             });
         } else {
             legion_thermal_card(ui, width, view, &mut intents, enabled);
-            ui.add_space(12.0);
-            legion_fans_card(ui, width, view, &mut intents, enabled);
+            if fans_ready {
+                ui.add_space(12.0);
+                legion_fans_card(ui, width, view, &mut intents, enabled);
+            }
             ui.add_space(12.0);
             legion_cpu_card(ui, width, view, &mut lstate, &mut intents, enabled);
         }
 
-        ui.add_space(10.0);
-        egui::CollapsingHeader::new("Avanzado · curva de fans y restauración")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.add_space(6.0);
-                legion_curve_card(ui, width, view, &mut lstate, &mut intents, enabled);
-                ui.add_space(12.0);
-                legion_restore_strip(ui, width, &mut lstate, &mut intents, enabled);
-            });
+        if curve_ready {
+            ui.add_space(10.0);
+            egui::CollapsingHeader::new("Avanzado · curva de fans y restauración")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.add_space(6.0);
+                    legion_curve_card(ui, width, view, &mut lstate, &mut intents, enabled);
+                    ui.add_space(12.0);
+                    legion_restore_strip(ui, width, &mut lstate, &mut intents, enabled);
+                });
+        }
 
         ui.add_space(6.0);
         egui::CollapsingHeader::new("Modo Jefe · quién manda en el EC")
@@ -4772,6 +4798,7 @@ struct LegionView {
     competitors: Vec<Competitor>,
     chief: bool,
     note: Option<String>,
+    warnings: Vec<String>,
     led: LedInfo,
 }
 
@@ -4881,6 +4908,15 @@ impl LegionView {
             competitors,
             chief: jbool(data, &["chief"]).unwrap_or(false),
             note: jstr(data, &["error"]).map(str::to_string),
+            warnings: data
+                .get("warnings")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -5303,9 +5339,55 @@ fn fan_row(ui: &mut egui::Ui, name: &str, rpm: u32, max: u32) {
     meter(ui, frac, color);
 }
 
+fn hardware_guide(ui: &mut egui::Ui) {
+    egui::CollapsingHeader::new("Guía rápida · qué es el EC y qué temperatura es sana")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "EC = Embedded Controller. Es el chip chico de la motherboard que maneja ventiladores, modos térmicos, batería y el LED del botón. No es el CPU ni Windows: es firmware. Domador le habla por WMI, la interfaz que expone el BIOS. Si el BIOS no publica un método (por ejemplo, el segundo fan o una curva), ninguna app de usuario puede controlarlo sin un driver de kernel.",
+                    )
+                    .size(10.5)
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+            ui.add_space(9.0);
+            ui.label(RichText::new("Zonas para esta Legion (5800H + RTX 3070 Laptop)").size(11.0).strong().color(TEXT));
+            ui.add_space(5.0);
+            for (zone, color, text) in [
+                ("Fresco", OK, "CPU/GPU por debajo de 70 °C: ideal en reposo o carga liviana."),
+                ("Normal", BRASS, "CPU 70–85 °C y GPU 65–80 °C en juego: sano y esperable."),
+                ("Caliente", WARN, "85–90 °C: picos cortos aceptables; sostenido ya castiga al silicio."),
+                ("Límite", COPPER_HI, "CPU >90 °C o GPU >85 °C: throttling y menos FPS. Revisá polvo, pasta y entrada de aire."),
+                ("Crítico", DANGER, "CPU >95 °C o GPU >90 °C: soltá la carga y revisá refrigeración."),
+            ] {
+                ui.horizontal_wrapped(|ui| {
+                    dot(ui, color, 3.0);
+                    ui.label(RichText::new(zone).size(10.5).strong().color(color));
+                    ui.label(RichText::new(text).size(10.0).color(MUTED));
+                });
+                ui.add_space(2.0);
+            }
+            ui.add_space(6.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "La mejor temperatura no es la más baja: es la que se mantiene estable sin throttling. En esta máquina, 75–85 °C de CPU bajo carga sostenida es una buena zona; 90 °C+ durante minutos es señal de que la refrigeración está al límite. El riesgo real es el calor sostenido, no un pico de dos segundos.",
+                    )
+                    .size(10.0)
+                    .color(FAINT),
+                )
+                .wrap(),
+            );
+        });
+}
+
 fn legion_analysis_section(
     ui: &mut egui::Ui,
-    width: f32,
+    _width: f32,
     adaptive: &Adaptive,
     tele: &Telemetry,
     lstate: &mut LegionUi,
@@ -5315,10 +5397,12 @@ fn legion_analysis_section(
         .default_open(false)
         .show(ui, |ui| {
             ui.add_space(6.0);
-            if width >= 860.0 {
-                let left = (width * 0.36).floor().max(320.0);
-                let right = (width - left - 12.0).max(320.0);
+            let avail = ui.available_width();
+            if avail >= 860.0 {
+                let left = (avail * 0.36).floor().max(300.0);
+                let right = (avail - left - 12.0).max(300.0);
                 ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
                     ui.allocate_ui_with_layout(
                         Vec2::new(left, 0.0),
                         egui::Layout::top_down(Align::Min),
@@ -5332,9 +5416,9 @@ fn legion_analysis_section(
                     );
                 });
             } else {
-                legion_adaptive_card(ui, width, adaptive, lstate, intents);
+                legion_adaptive_card(ui, avail, adaptive, lstate, intents);
                 ui.add_space(12.0);
-                legion_telemetry_card(ui, width, tele, lstate, intents);
+                legion_telemetry_card(ui, avail, tele, lstate, intents);
             }
         });
 }
@@ -5480,16 +5564,19 @@ fn legion_fans_card(
 ) {
     card(ui, width, |ui| {
         section(ui, "Ventiladores", Some("RPM"));
-        if view.fans.is_empty() {
+        let mut shown = 0usize;
+        for fan in view.fans.iter().filter(|fan| fan.rpm > 0 || fan.max > 0) {
+            fan_row(ui, &fan.id, fan.rpm, fan.max);
+            ui.add_space(3.0);
+            shown += 1;
+        }
+        if shown == 0 {
             ui.label(
-                RichText::new("El EC no reporta ventiladores.")
+                RichText::new("El BIOS no reporta ventiladores en este modelo.")
                     .size(10.5)
                     .color(FAINT),
             );
-        }
-        for fan in &view.fans {
-            fan_row(ui, &fan.id, fan.rpm, fan.max);
-            ui.add_space(3.0);
+            return;
         }
         ui.add_space(7.0);
         let inner = ui.available_width();
@@ -6585,6 +6672,237 @@ fn tele_tile(
 }
 
 fn legion_telemetry_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    tele: &Telemetry,
+    lstate: &mut LegionUi,
+    intents: &mut LegionIntent,
+) {
+    card(ui, width, |ui| {
+        let refreshed = match tele.fetched {
+            Some(at) => format!("hace {}", compact_secs(at.elapsed().as_secs_f64())),
+            None => "sin lecturas".to_string(),
+        };
+        section(ui, "Telemetría", Some(refreshed.as_str()));
+
+        let ranges: [u32; 3] = [10, 30, 60];
+        let items: [(&str, bool); 3] = [
+            ("10 min", lstate.tele_range == 10),
+            ("30 min", lstate.tele_range == 30),
+            ("60 min", lstate.tele_range == 60),
+        ];
+        if let Some(idx) = option_grid(ui, &items, 70.0, 26.0, true) {
+            lstate.tele_range = ranges[idx];
+        }
+        ui.add_space(7.0);
+        ui.horizontal_wrapped(|ui| {
+            if btn(ui, "Actualizar", 92.0, 26.0, Btn::Secondary, !tele.loading).clicked() {
+                intents.tele_fetch = true;
+            }
+            if btn(ui, "Exportar CSV", 108.0, 26.0, Btn::Secondary, true).clicked() {
+                intents.tele_export = true;
+            }
+            if switch(ui, Id::new("legion-tele-live"), lstate.tele_auto).clicked() {
+                lstate.tele_auto = !lstate.tele_auto;
+            }
+            ui.label(
+                RichText::new(if lstate.tele_auto {
+                    "En vivo"
+                } else {
+                    "Manual"
+                })
+                .size(10.0)
+                .color(if lstate.tele_auto { MUTED } else { FAINT }),
+            );
+        });
+        ui.add_space(9.0);
+
+        if let Some(err) = &tele.error {
+            if tele_state(
+                ui,
+                err.title(),
+                &err.body(),
+                err.color(),
+                "Reintentar",
+                !tele.loading,
+            ) {
+                intents.tele_fetch = true;
+            }
+            return;
+        }
+        let Some(data) = tele.data.as_ref() else {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(if tele.loading {
+                        "Leyendo el histórico del motor…"
+                    } else {
+                        "Todavía no hay histórico en memoria: pedilo con Actualizar."
+                    })
+                    .size(10.5)
+                    .color(FAINT),
+                )
+                .wrap(),
+            );
+            return;
+        };
+        if data.samples.is_empty() {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "El motor responde pero no hay muestras en esta ventana. Dejalo unos segundos y reintentá.",
+                    )
+                    .size(10.5)
+                    .color(FAINT),
+                )
+                .wrap(),
+            );
+            return;
+        }
+
+        let samples = &data.samples;
+        let t0 = samples.first().map(|s| s.ts).unwrap_or(0.0);
+        let t1 = samples.last().map(|s| s.ts).unwrap_or(t0);
+        let span = (t1 - t0).max(1.0);
+        let xs: Vec<f32> = samples
+            .iter()
+            .map(|s| (((s.ts - t0) / span) as f32).clamp(0.0, 1.0))
+            .collect();
+        let cpu: Vec<Option<f64>> = samples.iter().map(|s| s.cpu).collect();
+        let gpu: Vec<Option<f64>> = samples.iter().map(|s| s.gpu).collect();
+        let fan1: Vec<Option<f64>> = samples.iter().map(|s| s.fan1).collect();
+        let fan2: Vec<Option<f64>> = samples.iter().map(|s| s.fan2).collect();
+        let cpu_stats = stat_of(samples, |s| s.cpu);
+        let gpu_stats = stat_of(samples, |s| s.gpu);
+        let fan1_stats = stat_of(samples, |s| s.fan1);
+        let fan2_stats = stat_of(samples, |s| s.fan2);
+        let has_fans = fan1_stats.is_some() || fan2_stats.is_some();
+
+        let rpm_scale = fan1
+            .iter()
+            .chain(fan2.iter())
+            .filter_map(|v| *v)
+            .fold(3600.0_f64, f64::max);
+        let inner = ui.available_width();
+        let gap = 7.0;
+        let cell = ((inner - gap * 3.0) / 4.0).floor().max(58.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            tele_tile(ui, cell, "CPU", cpu_stats, 100.0, 1, "°C", BRASS);
+            tele_tile(ui, cell, "GPU", gpu_stats, 100.0, 1, "°C", COPPER_HI);
+            tele_tile(ui, cell, "FAN 1", fan1_stats, rpm_scale, 0, "rpm", PATINA);
+            tele_tile(ui, cell, "FAN 2", fan2_stats, rpm_scale, 0, "rpm", OK);
+        });
+
+        let range_label = format!("-{} min", data.minutes);
+        let mut hover: Option<usize> = None;
+        ui.add_space(10.0);
+        eyebrow(ui, "Temperaturas");
+        ui.add_space(4.0);
+        tele_chart(
+            ui,
+            116.0,
+            &xs,
+            &[("CPU", BRASS, &cpu), ("GPU", COPPER_HI, &gpu)],
+            "°C",
+            Some(90.0),
+            &range_label,
+            &mut hover,
+        );
+        if has_fans {
+            ui.add_space(8.0);
+            eyebrow(ui, "Ventiladores");
+            ui.add_space(4.0);
+            tele_chart(
+                ui,
+                86.0,
+                &xs,
+                &[("Fan 1", PATINA, &fan1), ("Fan 2", OK, &fan2)],
+                "rpm",
+                None,
+                &range_label,
+                &mut hover,
+            );
+        }
+        if let Some(sample) = hover.and_then(|i| samples.get(i)) {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "hace {} · CPU {} · GPU {} · F1 {}{}",
+                        compact_secs((t1 - sample.ts).max(0.0)),
+                        fmt_v(sample.cpu, 1, "°C"),
+                        fmt_v(sample.gpu, 1, "°C"),
+                        fmt_v(sample.fan1, 0, "rpm"),
+                        if sample.fan2.is_some() {
+                            format!(" · F2 {}", fmt_v(sample.fan2, 0, "rpm"))
+                        } else {
+                            String::new()
+                        }
+                    ))
+                    .size(9.5)
+                    .monospace()
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+        }
+
+        ui.add_space(10.0);
+        let cpu_over = seconds_over(samples, |s| s.cpu, 90.0);
+        let gpu_over = seconds_over(samples, |s| s.gpu, 90.0);
+        let pct = |secs: f64| if span > 0.0 { secs / span * 100.0 } else { 0.0 };
+        telemetry_kv(
+            ui,
+            "CPU mín / prom / máx",
+            &format!(
+                "{} / {} / {} °C",
+                fmt_v(cpu_stats.map(|s| s.min), 1, ""),
+                fmt_v(cpu_stats.map(|s| s.avg), 1, ""),
+                fmt_v(cpu_stats.map(|s| s.max), 1, "")
+            ),
+            BRASS,
+        );
+        telemetry_kv(
+            ui,
+            "GPU mín / prom / máx",
+            &format!(
+                "{} / {} / {} °C",
+                fmt_v(gpu_stats.map(|s| s.min), 1, ""),
+                fmt_v(gpu_stats.map(|s| s.avg), 1, ""),
+                fmt_v(gpu_stats.map(|s| s.max), 1, "")
+            ),
+            COPPER_HI,
+        );
+        telemetry_kv(
+            ui,
+            "Sobre 90 °C",
+            &format!(
+                "CPU {} · GPU {}",
+                fmt_dur(cpu_over) + &format!(" ({:.0} %)", pct(cpu_over)),
+                fmt_dur(gpu_over) + &format!(" ({:.0} %)", pct(gpu_over))
+            ),
+            if cpu_over > 0.0 || gpu_over > 0.0 {
+                WARN
+            } else {
+                OK
+            },
+        );
+        telemetry_kv(
+            ui,
+            "Ventana",
+            &format!(
+                "{} muestras · {} de {} min",
+                samples.len(),
+                fmt_dur(span),
+                data.minutes
+            ),
+            MUTED,
+        );
+    });
+}
+
+#[allow(dead_code)]
+fn legion_telemetry_card_full(
     ui: &mut egui::Ui,
     width: f32,
     tele: &Telemetry,

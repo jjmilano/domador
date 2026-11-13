@@ -559,11 +559,13 @@ impl Ctx {
         let cpu_temp = self
             .call_int(CLASS_GAMEZONE, "GetCPUTemp", &[], "Data")
             .map_err(|err| notes.push(err))
-            .ok();
+            .ok()
+            .filter(|v| *v > 0);
         let gpu_temp = self
             .call_int(CLASS_GAMEZONE, "GetGPUTemp", &[], "Data")
             .map_err(|err| notes.push(err))
-            .ok();
+            .ok()
+            .filter(|v| *v > 0);
         let mut fans = Vec::with_capacity(2);
         for fan_id in [1u8, 2u8] {
             let rpm = self
@@ -586,8 +588,9 @@ impl Ctx {
                     .to_string(),
             )
         } else {
-            dedup_notes(notes)
+            None
         };
+        let warnings = friendly_warnings(notes);
 
         let mut payload = json!({
             "ok": true,
@@ -598,6 +601,7 @@ impl Ctx {
             "fans": fans,
             "thermal": {"id": thermal_id.unwrap_or(0)},
             "cpu": {"long": cpu_long},
+            "warnings": warnings,
         });
         if let Some(error) = error {
             if let Some(object) = payload.as_object_mut() {
@@ -649,11 +653,13 @@ impl Ctx {
         let cpu_temp = self
             .call_int(CLASS_GAMEZONE, "GetCPUTemp", &[], "Data")
             .map_err(|err| notes.push(err))
-            .ok();
+            .ok()
+            .filter(|v| *v > 0);
         let gpu_temp = self
             .call_int(CLASS_GAMEZONE, "GetGPUTemp", &[], "Data")
             .map_err(|err| notes.push(err))
-            .ok();
+            .ok()
+            .filter(|v| *v > 0);
 
         let cpu_long = self
             .read_cpu_limit(true)
@@ -698,9 +704,12 @@ impl Ctx {
                  modo térmico, fans, temperaturas y límites quedan sin dato hasta elevar Domador"
                     .to_string(),
             )
+        } else if !available {
+            Some("el EC no responde por WMI; el panel queda en modo lectura".to_string())
         } else {
-            dedup_notes(notes)
+            None
         };
+        let warnings = friendly_warnings(notes);
 
         let mut payload = json!({
             "ok": true,
@@ -724,6 +733,7 @@ impl Ctx {
                 self.led_follows,
                 self.led_warning.as_deref(),
             ),
+            "warnings": warnings,
         });
         if let Some(error) = error {
             if let Some(object) = payload.as_object_mut() {
@@ -1584,6 +1594,7 @@ fn is_denied(message: &str) -> bool {
         || message.contains("wbem_e_access_denied")
 }
 
+#[allow(dead_code)]
 fn dedup_notes(notes: Vec<String>) -> Option<String> {
     let mut unique: Vec<String> = Vec::new();
     for note in notes {
@@ -1600,6 +1611,32 @@ fn dedup_notes(notes: Vec<String>) -> Option<String> {
         text = text.chars().take(397).collect::<String>() + "...";
     }
     Some(text)
+}
+
+/// Convierte errores crudos de WMI/HRESULT en frases que se puedan mostrar.
+/// El detalle técnico se queda en el log; la UI no escupe hex al usuario.
+fn friendly_warnings(notes: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for note in notes {
+        let lower = note.to_ascii_lowercase();
+        let message = if lower.contains("80041003") || lower.contains("access denied") {
+            "Windows bloqueó el acceso al EC; hace falta una sesión elevada.".to_string()
+        } else if lower.contains("fan2") || lower.contains("fan 2") {
+            "El BIOS no expone la lectura del segundo ventilador.".to_string()
+        } else if lower.contains("fan_get_table") || lower.contains("tabla") {
+            "El BIOS no publica una curva de fans compatible con Domador.".to_string()
+        } else if lower.contains("8004100f") || lower.contains("not supported") {
+            "Tu BIOS no expone ese método WMI en este modelo.".to_string()
+        } else if lower.contains("cp u") || lower.contains("cputemp") || lower.contains("gputemp") {
+            "El sensor de temperatura del EC no está expuesto.".to_string()
+        } else {
+            "El EC no expone una de las lecturas; el resto sigue funcionando.".to_string()
+        };
+        if !out.iter().any(|seen| seen == &message) {
+            out.push(message);
+        }
+    }
+    out
 }
 
 fn now_epoch() -> f64 {
