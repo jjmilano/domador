@@ -83,6 +83,9 @@ const MAX_BODY: usize = 64 * 1024;
 struct ApiError {
     code: u16,
     message: String,
+    /// Sólo lo usa Legion: distingue "la máquina no expone WMI" de un error
+    /// genérico, sin inventar un 500 para una notebook que no es Legion.
+    available: Option<bool>,
 }
 
 impl ApiError {
@@ -90,7 +93,13 @@ impl ApiError {
         Self {
             code,
             message: message.into(),
+            available: None,
         }
+    }
+
+    fn with_available(mut self, available: bool) -> Self {
+        self.available = Some(available);
+        self
     }
 
     fn bad(message: impl Into<String>) -> Self {
@@ -172,6 +181,33 @@ fn handle(mut request: Request, engine: Shared) {
             "/api/families" => {
                 let families = lock(&engine).families();
                 return reply(request, 200, &json!({"ok": true, "families": families}));
+            }
+            // Estado Legion: siempre 200, incluso sin admin o sin WMI. El
+            // contrato vive en docs/LEGION-API.md.
+            "/api/legion" => {
+                crate::telemetry::ensure_started();
+                let status = crate::legion::status();
+                return reply(request, 200, &status);
+            }
+            // Historial de telemetría (ring de 24 h). Nunca 500: si WMI no
+            // está, responde 200 con samples vacíos o con nulls.
+            "/api/legion/history" => {
+                return match crate::telemetry::history(&url) {
+                    Ok(value) => reply(request, 200, &value),
+                    Err(message) => reply(request, 400, &json!({"ok": false, "error": message})),
+                }
+            }
+            "/api/legion/export.csv" => {
+                return match crate::telemetry::export_csv(&url) {
+                    Ok(csv) => csv_file(request, csv, "domador-telemetry.csv"),
+                    Err(message) => reply(request, 400, &json!({"ok": false, "error": message})),
+                }
+            }
+            // Control adaptativo: la lectura no exige admin; POST valida y
+            // nunca escribe en el EC sin admin/WMI.
+            "/api/legion/adaptive" => {
+                crate::telemetry::ensure_started();
+                return reply(request, 200, &crate::adaptive::status());
             }
             "/api/admin-task" => {
                 let admin = win::is_admin();
@@ -322,11 +358,13 @@ fn handle(mut request: Request, engine: Shared) {
     let result = dispatch(&path, &payload, &engine);
     match result {
         Ok(value) => reply(request, 200, &value),
-        Err(err) => reply(
-            request,
-            err.code,
-            &json!({"ok": false, "error": err.message}),
-        ),
+        Err(err) => {
+            let mut body = json!({"ok": false, "error": err.message});
+            if let (Some(available), Some(map)) = (err.available, body.as_object_mut()) {
+                map.insert("available".into(), json!(available));
+            }
+            reply(request, err.code, &body)
+        }
     }
 }
 
@@ -337,6 +375,9 @@ fn is_get_only(path: &str) -> bool {
             | "/api/state"
             | "/api/mem"
             | "/api/families"
+            | "/api/legion"
+            | "/api/legion/history"
+            | "/api/legion/export.csv"
             | "/api/process"
             | "/favicon.ico"
             | "/icon-32.png"
@@ -523,6 +564,15 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, ApiError
             });
             Ok(json!({"ok": true}))
         }
+        // Legion: cada escritura exige admin y hace backup antes de tocar el EC.
+        "/api/legion/thermal" => crate::legion::set_thermal(body).map_err(legion_error),
+        "/api/legion/fans" => crate::legion::set_fans(body).map_err(legion_error),
+        "/api/legion/cpu" => crate::legion::set_cpu(body).map_err(legion_error),
+        "/api/legion/chief" => crate::legion::set_chief(body).map_err(legion_error),
+        "/api/legion/restore" => crate::legion::restore().map_err(legion_error),
+        // Control adaptativo: configurar/armar/apagar/restaurar. No es GET-only
+        // porque acepta POST; la lectura va por el match de GET.
+        "/api/legion/adaptive" => crate::adaptive::update(body).map_err(legion_error),
         // La creación de la tarea corre en segundo plano: PowerShell puede
         // tardar y antes bloqueaba el accept loop completo.
         "/api/admin-task" => start_admin_job(engine),
@@ -530,6 +580,16 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, ApiError
             "endpoint desconocido: {other}"
         ))),
     }
+}
+
+/// Traduce el error de Legion a la API: 403 sin admin, 503 con
+/// `available:false` cuando el problema es que no hay WMI.
+fn legion_error(err: crate::legion::Error) -> ApiError {
+    let mut api = ApiError::new(err.status, err.message);
+    if err.status == 503 {
+        api = api.with_available(false);
+    }
+    api
 }
 
 // ------------------------------------------------------ ficha de un proceso
@@ -671,7 +731,7 @@ fn process_detail_response(url: &str, engine: &Shared) -> Result<Value, ApiError
 
 /// Primer valor de un parámetro de query. Sólo se decodifica `%XX` y `+`, que
 /// es lo único que puede aparecer en un `pid` numérico.
-fn query_param(url: &str, key: &str) -> Option<String> {
+pub(crate) fn query_param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
     for pair in query.split('&') {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -954,6 +1014,27 @@ fn binary_file(request: Request, body: &'static [u8], content_type: &str) -> () 
         .with_status_code(200)
         .with_header(Header::from_bytes("Content-Type", content_type).expect("header válido"))
         .with_header(Header::from_bytes("Cache-Control", "max-age=86400").expect("header válido"))
+        .with_header(
+            Header::from_bytes("X-Content-Type-Options", "nosniff").expect("header válido"),
+        );
+    let _ = request.respond(response);
+}
+
+/// CSV de telemetría: texto plano que el navegador/UI descarga tal cual.
+fn csv_file(request: Request, body: String, filename: &str) {
+    let response = Response::from_data(body.into_bytes())
+        .with_status_code(200)
+        .with_header(
+            Header::from_bytes("Content-Type", "text/csv; charset=utf-8").expect("header válido"),
+        )
+        .with_header(
+            Header::from_bytes(
+                "Content-Disposition",
+                format!("attachment; filename=\"{filename}\""),
+            )
+            .expect("header válido"),
+        )
+        .with_header(Header::from_bytes("Cache-Control", "no-store").expect("header válido"))
         .with_header(
             Header::from_bytes("X-Content-Type-Options", "nosniff").expect("header válido"),
         );

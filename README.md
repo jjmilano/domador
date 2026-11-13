@@ -231,6 +231,12 @@ Todos son `POST` con body JSON salvo los `GET`. Respuesta: `{"ok": true}` o `{"o
 | `GET /api/families` | — | Agregado por familia (Chrome, WebView, Electron) |
 | `GET /api/admin-task` | — | Estado de admin, tarea programada y job de creación |
 | `GET /api/process?pid=1234` | — | Ficha bajo demanda: ruta, fabricante, padre, firma, comando y descripción conocida |
+| `GET /api/legion` | — | Estado Legion por WMI (modo térmico, fans, temps, límites, tabla, LED del botón, competidores); siempre 200, ver `docs/LEGION-API.md` |
+| `POST /api/legion/thermal` | `{"mode":3}` o `{"mode":"performance"}` | Cambia el modo térmico (1..4) |
+| `POST /api/legion/fans` | `{"full_speed":true}` / `{"table":[1,2,...]}` | Full speed o curva de 10 niveles (1..10); exige backup stock |
+| `POST /api/legion/cpu` | `{"long":45,"short":65}` | Límites de potencia CPU validados contra el firmware |
+| `POST /api/legion/chief` | `{"enabled":true}` | Cierra Vantage/LegionArena/LLT/LFC/UXTU/RyzenController y reporta `killed`/`failed`/`skipped` |
+| `POST /api/legion/restore` | `{}` | Restaura el backup de `legion.json` (tabla stock + modo previo) |
 | `POST /api/meta` | `{"pid":1234}` | Detalle de un proceso (ruta, prioridad, afinidad, EcoQoS) |
 | `POST /api/profile` | `{"name":"gaming","target":"juego.exe"}` | Cambia de perfil: `full_power`, `gaming`, `ai`, `balanced` |
 | `POST /api/priority` | `{"pid":1234,"cls":"high"}` | Cambia la prioridad |

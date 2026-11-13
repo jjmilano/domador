@@ -1,10 +1,13 @@
+pub mod adaptive;
 pub mod api;
 pub mod config;
 pub mod engine;
 pub mod gpu;
+pub mod legion;
 pub mod mcp;
 pub mod model;
 pub mod nt;
 pub mod power;
 pub mod sys;
+pub mod telemetry;
 pub mod win;

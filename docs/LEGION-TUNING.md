@@ -34,6 +34,41 @@ La app que recordás para ventiladores es casi seguro **Legion Fan Control**. La
 - En juegos GPU-bound, bajar el CPU a ~35–45 W puede dejar más margen térmico y de potencia para la 3070; en cargas CPU-bound baja el rendimiento. Hay que medirlo, no asumirlo.
 - El “undervolt” que sí existe es el de la **GPU**, con Afterburner: curva de frecuencia/voltaje y offsets. Es la modificación mínima con mayor impacto en temperaturas y clocks sostenidos, pero depende del silicio.
 
+## LED del botón de encendido
+
+El LED del botón de encendido (el “home button” que ves arriba) lo maneja el firmware según el modo térmico:
+
+- **Quiet** → azul.
+- **Balance/Auto** → blanco.
+- **Performance** → rojo.
+- **Custom** → lo que defina el firmware/EC.
+
+No es un color independiente que haya que setear a mano: al cambiar el modo térmico por WMI, el EC debería cambiar el LED solo. Domador va a leer el estado con `LENOVO_LIGHTING_METHOD` (`Lighting_ID = 4`, `Get_Lighting_Current_Status`) y mostrar el color esperado; si el LED no sigue al modo, va a avisar. No se escriben colores arbitrarios.
+
+## Tweaks con impacto real
+
+1. **Undervolt de GPU con Afterburner**: es el tweak más rentable. La 3070 Laptop ya está en 140 W máximos; no hay “más vatios” por software. Una curva de ~800–850 mV con 1700–1800 MHz y memoria +500 suele bajar temperaturas y sostener clocks; el valor exacto depende del silicio. Probar con Heaven/Time Spy y bajar si hay artifacts.
+2. **Límite de CPU por perfil**: en juegos GPU-bound, 35–45 W suelen dejar más margen a la GPU; en cargas CPU-bound, 54–60 W. El 5800H no permite undervolt por núcleo.
+3. **Curva de fans**: rampa temprana y agresiva sin llegar a máximo permanente; evita throttling y baja ruido frente a Full Speed constante.
+4. **Modo dGPU/MUX**: para jugar, desactivar híbrido y usar sólo la 3070; requiere reinicio. Mejora algunos juegos, sacrifica batería.
+5. **NVIDIA/Windows**: plan Legion Performance, “Prefer maximum performance” en el panel NVIDIA, Game Mode activo; no usar “Ultimate Performance” a ciegas.
+6. **Cerrar el fondo**: ya limpiamos el arranque; Vantage, UXTU, Chrome/WebView y Electron de fondo son los que más reservan memoria.
+7. **Hardware**: base/cooling pad y, si las temperaturas siguen altas, repaste. Eso suele rendir más que cualquier tweak de software.
+
+No hay que tocar BIOS ni desactivar boost globalmente: en juegos suele empeorar los 1% lows. Medir con CapFrameX/Time Spy, misma escena y misma temperatura ambiente.
+
+## Control adaptativo
+
+El modo automático debe ser un supervisor con estados, no un `if` por temperatura:
+
+- **Normal**: temperatura bajo el objetivo; fans en la curva elegida y límites stock.
+- **Caliente**: supera `hot_c` durante `dwell_s`; sube fans y, si hace falta, baja el límite de CPU.
+- **Crítico**: supera `critical_c`; fans a máxima y CPU limitada; aviso visible.
+- Vuelve a Normal sólo si baja `hysteresis_c` por debajo del umbral durante `cooldown_s`.
+- Nunca cambia el modo térmico ni la tabla de fans cada 2 segundos; eso produce flapping y desgaste.
+- Cada acción se registra con temperatura, regla, valor anterior y resultado. Si no hay admin, no escribe: muestra `limited`.
+- El LED del botón sigue el modo térmico; si el modo no cambia, no se fuerza un color.
+
 ## Lo que el hardware expone por WMI
 
 En `root\wmi` existen las clases del driver Lenovo:

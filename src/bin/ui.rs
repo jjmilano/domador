@@ -25,10 +25,22 @@ use eframe::egui::{
 use egui_extras::{Column, TableBuilder};
 use serde_json::{json, Value};
 
-const PORT: u16 = 8787;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MB: f64 = 1024.0 * 1024.0;
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// Puerto del motor local. `DOMADOR_PORT` permite apuntar la UI a otro motor
+/// (útil para probar la interfaz contra un doble sin tocar el que está en uso).
+fn port() -> u16 {
+    static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *PORT.get_or_init(|| {
+        std::env::var("DOMADOR_PORT")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u16>().ok())
+            .filter(|p| *p >= 1024)
+            .unwrap_or(8787)
+    })
+}
 
 // ---------------------------------------------------------------- tokens ---
 // Carbón cálido de fondo, latón para la marca y el foco, cobre para alertas.
@@ -76,6 +88,78 @@ struct Detail {
     data: Option<Arc<Value>>,
 }
 
+/// Estado del backend Legion (`/api/legion`). Vive aparte del snapshot de
+/// procesos porque se refresca a otro ritmo y puede fallar por su cuenta
+/// (404 mientras el backend no exista, 403 sin admin, 503 sin WMI).
+#[derive(Clone, Debug)]
+enum LegionErr {
+    /// 404: el motor todavía no publica el endpoint.
+    Pending,
+    /// 401/403: hace falta una sesión elevada.
+    NoAdmin,
+    /// 501/503: el EC no expone WMI.
+    Wmi,
+    /// El motor no contesta.
+    Offline,
+    /// Cualquier otra respuesta con cuerpo.
+    Other(String),
+}
+
+impl LegionErr {
+    fn from_status(code: u16, body: String) -> Self {
+        match code {
+            401 | 403 => Self::NoAdmin,
+            404 => Self::Pending,
+            501 | 503 => Self::Wmi,
+            _ => {
+                let body: String = body.trim().chars().take(180).collect();
+                if body.is_empty() {
+                    Self::Other(format!("HTTP {code}"))
+                } else {
+                    Self::Other(format!("HTTP {code} · {body}"))
+                }
+            }
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Pending => "Backend Legion pendiente",
+            Self::NoAdmin => "Falta administrador",
+            Self::Wmi => "WMI del EC no disponible",
+            Self::Offline => "Motor sin conexión",
+            Self::Other(_) => "El EC devolvió un error",
+        }
+    }
+
+    fn body(&self) -> String {
+        match self {
+            Self::Pending => "GET /api/legion responde 404: el motor todavía no publica el panel del EC. La pestaña queda armada y se llena sola cuando exista el backend; Procesos y Salud siguen funcionando igual.".into(),
+            Self::NoAdmin => "El control del EC sólo acepta órdenes de una sesión elevada. Elevá la UI (UAC) y volvé a Legion: los botones se habilitan solos.".into(),
+            Self::Wmi => "Windows no expone el controlador WMI del EC (ATKWMI/ASUS o equivalente). Sin eso no hay RPM ni límites: el panel queda en modo lectura.".into(),
+            Self::Offline => "No hay respuesta en 127.0.0.1:8787. Arrancá el motor con `domador run --no-open` y reintentá.".into(),
+            Self::Other(text) => text.clone(),
+        }
+    }
+
+    fn color(&self) -> Color32 {
+        match self {
+            Self::Pending | Self::NoAdmin | Self::Wmi => WARN,
+            Self::Offline => DANGER,
+            Self::Other(_) => COPPER_HI,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LegionData {
+    data: Option<Arc<Value>>,
+    error: Option<LegionErr>,
+    /// Última respuesta de un POST de Legion (para saber qué se cerró).
+    action: Option<Arc<Value>>,
+    busy: Option<String>,
+}
+
 #[derive(Default)]
 struct Shared {
     state: Option<Arc<Value>>,
@@ -84,6 +168,9 @@ struct Shared {
     toast: Option<Toast>,
     last_ok: Option<Instant>,
     detail: Option<Detail>,
+    legion: LegionData,
+    telemetry: Telemetry,
+    adaptive: Adaptive,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -114,6 +201,7 @@ enum Tab {
     Processes,
     Health,
     Settings,
+    Legion,
 }
 
 #[derive(Clone, Copy)]
@@ -121,6 +209,7 @@ enum Icon {
     List,
     Pulse,
     Gear,
+    Fan,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -140,12 +229,78 @@ struct DomadorUi {
     kill_confirm: Option<(u32, String)>,
     logo: Option<egui::TextureHandle>,
     focus_search: bool,
+    /// Borradores de la pestaña Legion: se sincronizan con el EC salvo que el
+    /// usuario los esté tocando.
+    legion_ui: LegionUi,
+}
+
+/// Borradores editables del panel Legion. `*_edited` marca que el usuario movió
+/// algo y todavía no aplicó: mientras esté en true no pisamos sus valores con
+/// el polling.
+struct LegionUi {
+    cpu_long: i64,
+    cpu_short: i64,
+    cpu_edited: bool,
+    curve: [i64; 10],
+    curve_edited: bool,
+    pending_cpu: Option<(i64, i64, String)>,
+    confirm_restore: bool,
+    /// Ventana del histórico de telemetría, en minutos (10/30/60).
+    tele_range: u32,
+    /// Refresco automático del histórico mientras la pestaña está abierta.
+    tele_auto: bool,
+    /// Borradores del lazo AUTO: se sincronizan con el motor salvo que el
+    /// usuario los esté tocando (`ad_edited`).
+    ad_enabled: bool,
+    ad_target: i64,
+    ad_hot: i64,
+    ad_critical: i64,
+    ad_edited: bool,
+}
+
+impl Default for LegionUi {
+    fn default() -> Self {
+        Self {
+            cpu_long: 0,
+            cpu_short: 0,
+            cpu_edited: false,
+            curve: [5; 10],
+            curve_edited: false,
+            pending_cpu: None,
+            confirm_restore: false,
+            tele_range: 10,
+            tele_auto: true,
+            ad_enabled: false,
+            ad_target: 82,
+            ad_hot: 85,
+            ad_critical: 92,
+            ad_edited: false,
+        }
+    }
+}
+
+/// Intenciones que devuelve el dibujo de la pestaña. Se aplican después de
+/// pintar para no pedir `&mut self` dentro de las tarjetas.
+#[derive(Default)]
+struct LegionIntent {
+    thermal: Option<String>,
+    cpu: Option<(i64, i64)>,
+    curve: Option<Vec<i64>>,
+    full_speed: Option<bool>,
+    chief: Option<bool>,
+    restore: bool,
+    refresh: bool,
+    elevate: bool,
+    tele_fetch: bool,
+    tele_export: bool,
+    adaptive_fetch: bool,
+    adaptive: Option<Value>,
 }
 
 // ------------------------------------------------------------------- HTTP ---
 
 fn base() -> String {
-    format!("http://127.0.0.1:{PORT}")
+    format!("http://127.0.0.1:{}", port())
 }
 
 fn get_state() -> Result<Value, String> {
@@ -185,7 +340,7 @@ fn post(path: &'static str, body: Value) -> Result<Value, String> {
 }
 
 fn ensure_server() {
-    let addr = SocketAddr::from(([127, 0, 0, 1], PORT));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port()));
     if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
         return;
     }
@@ -267,6 +422,439 @@ fn act_bg(
                 });
             }
         }
+    });
+}
+
+// --------------------------------------------------------------- legion ---
+
+fn get_legion() -> Result<Value, LegionErr> {
+    match ureq::get(&format!("{}/api/legion", base())).call() {
+        Ok(response) => response
+            .into_json()
+            .map_err(|err| LegionErr::Other(format!("respuesta inválida: {err}"))),
+        Err(ureq::Error::Status(code, response)) => Err(LegionErr::from_status(
+            code,
+            response.into_string().unwrap_or_default(),
+        )),
+        Err(_) => Err(LegionErr::Offline),
+    }
+}
+
+fn legion_thread(shared: Arc<Mutex<Shared>>) {
+    // Un respiro al arrancar: primero que la UI pinte y consiga /api/state.
+    thread::sleep(Duration::from_millis(900));
+    loop {
+        let result = get_legion();
+        {
+            let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+            match result {
+                Ok(value) => {
+                    guard.legion.data = Some(Arc::new(value));
+                    guard.legion.error = None;
+                }
+                Err(err) => guard.legion.error = Some(err),
+            }
+        }
+        thread::sleep(Duration::from_millis(2600));
+    }
+}
+
+fn closed_names(value: &Value) -> Vec<String> {
+    for key in ["killed", "closed"] {
+        if let Some(items) = value.get(key).and_then(|v| v.as_array()) {
+            let names: Vec<String> = items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .or_else(|| jstr(item, &["name", "process", "exe"]).map(str::to_string))
+                })
+                .collect();
+            if !names.is_empty() {
+                return names;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn friendly_error(err: &str) -> String {
+    if err.contains("401") || err.contains("403") {
+        format!("Necesita administrador · {err}")
+    } else if err.contains("404") {
+        "El motor no conoce este comando (404): falta el backend Legion".to_string()
+    } else if err.contains("503") || err.contains("501") {
+        format!("El EC no respondió · {err}")
+    } else {
+        err.to_string()
+    }
+}
+
+fn push_legion_action(
+    shared: Arc<Mutex<Shared>>,
+    path: &'static str,
+    body: Value,
+    busy: String,
+    done: String,
+) {
+    {
+        let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.legion.busy = Some(busy);
+    }
+    thread::spawn(move || {
+        let result = post(path, body);
+        let ok = result.is_ok();
+        {
+            let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+            guard.legion.busy = None;
+            match result {
+                Ok(value) => {
+                    let closed = closed_names(&value);
+                    let text = if closed.is_empty() {
+                        done.clone()
+                    } else {
+                        format!("{done} · cerré {}", closed.join(", "))
+                    };
+                    guard.toast = Some(Toast {
+                        text,
+                        ok: true,
+                        at: Instant::now(),
+                    });
+                    guard.legion.action = Some(Arc::new(value));
+                }
+                Err(err) => {
+                    guard.toast = Some(Toast {
+                        text: friendly_error(&err),
+                        ok: false,
+                        at: Instant::now(),
+                    });
+                }
+            }
+        }
+        if ok {
+            // El EC tardó lo suyo: releemos antes de que llegue el próximo poll.
+            if let Ok(value) = get_legion() {
+                let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+                guard.legion.data = Some(Arc::new(value));
+                guard.legion.error = None;
+            }
+            store_state(&shared, get_state());
+        }
+    });
+}
+
+// -------------------------------------------------------------- telemetría ---
+
+/// Una muestra del histórico del EC (`GET /api/legion/history`). Los campos
+/// que el motor no publica quedan en `None`: el gráfico corta la línea en vez
+/// de inventar un cero, y las estadísticas ignoran el hueco.
+#[derive(Clone)]
+struct TeleSample {
+    ts: f64,
+    cpu: Option<f64>,
+    gpu: Option<f64>,
+    fan1: Option<f64>,
+    fan2: Option<f64>,
+    gpu_w: Option<f64>,
+    gpu_mhz: Option<f64>,
+    mode: Option<String>,
+}
+
+/// Estado del histórico. Tiene sus propios errores porque puede faltar aunque
+/// `/api/legion` responda bien (404 mientras el motor no guarde muestras).
+#[derive(Clone, Debug)]
+enum TelemetryErr {
+    Pending,
+    NoAdmin,
+    Offline,
+    Other(String),
+}
+
+impl TelemetryErr {
+    fn from_status(code: u16, body: String) -> Self {
+        match code {
+            401 | 403 => Self::NoAdmin,
+            404 => Self::Pending,
+            _ => {
+                let body: String = body.trim().chars().take(160).collect();
+                if body.is_empty() {
+                    Self::Other(format!("HTTP {code}"))
+                } else {
+                    Self::Other(format!("HTTP {code} · {body}"))
+                }
+            }
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Pending => "Histórico pendiente",
+            Self::NoAdmin => "Falta administrador",
+            Self::Offline => "Motor sin conexión",
+            Self::Other(_) => "El histórico devolvió un error",
+        }
+    }
+
+    fn body(&self) -> String {
+        match self {
+            Self::Pending => "GET /api/legion/history responde 404: el motor todavía no guarda histórico. La sección queda armada y se llena sola cuando publique el buffer; el resto de la pestaña sigue igual.".into(),
+            Self::NoAdmin => "El histórico del EC pide sesión elevada, igual que el resto del panel. Elevá la UI (UAC) y volvé a intentar.".into(),
+            Self::Offline => "No hay respuesta en el motor local. Arrancalo con `domador run --no-open` y reintentá.".into(),
+            Self::Other(text) => text.clone(),
+        }
+    }
+
+    fn color(&self) -> Color32 {
+        match self {
+            Self::Pending | Self::NoAdmin => WARN,
+            Self::Offline => DANGER,
+            Self::Other(_) => COPPER_HI,
+        }
+    }
+}
+
+/// Último histórico leído. `minutes` guarda el rango **pedido** (no el que
+/// trajo el motor) para saber cuándo hay que volver a pedir al mover el
+/// selector; `attempted` marca el último intento, así el reintento automático
+/// no martilla el endpoint en cada frame.
+#[derive(Clone, Default)]
+struct Telemetry {
+    data: Option<Arc<TelemetryData>>,
+    error: Option<TelemetryErr>,
+    loading: bool,
+    minutes: u32,
+    attempted: Option<Instant>,
+    fetched: Option<Instant>,
+}
+
+#[derive(Default)]
+struct TelemetryData {
+    samples: Vec<TeleSample>,
+    minutes: u32,
+}
+
+fn opt_num(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
+    if let Some(number) = value.as_f64() {
+        return number.is_finite().then_some(number);
+    }
+    if let Some(text) = value.as_str() {
+        return text.trim().parse::<f64>().ok().filter(|n| n.is_finite());
+    }
+    if let Some(object) = value.as_object() {
+        // Forma objeto (`{"rpm": 3200}` o `{"value": 62}`) por si el backend
+        // publica los fans como estructuras en vez de números sueltos.
+        for key in ["value", "temp", "celsius", "rpm"] {
+            if let Some(number) = object.get(key).and_then(|v| v.as_f64()) {
+                return number.is_finite().then_some(number);
+            }
+        }
+    }
+    None
+}
+
+fn sample_num(raw: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| opt_num(raw.get(*key)))
+}
+
+fn parse_sample(raw: &Value) -> Option<TeleSample> {
+    let ts = sample_num(raw, &["ts", "t", "time", "timestamp"])?;
+    // Algunos backends mandan milisegundos: 1e11 segundos no existe.
+    let ts = if ts > 1.0e11 { ts / 1000.0 } else { ts };
+    Some(TeleSample {
+        ts,
+        cpu: sample_num(raw, &["cpu_temp", "temp_cpu", "cpu"]),
+        gpu: sample_num(raw, &["gpu_temp", "temp_gpu", "gpu"]),
+        fan1: sample_num(raw, &["fan1", "fan1_rpm", "fan_1", "fan_1_rpm"]),
+        fan2: sample_num(raw, &["fan2", "fan2_rpm", "fan_2", "fan_2_rpm"]),
+        gpu_w: sample_num(raw, &["gpu_power_w", "gpu_power", "gpu_w"]),
+        gpu_mhz: sample_num(raw, &["gpu_clock_mhz", "gpu_clock", "gpu_mhz"]),
+        mode: jstr(raw, &["thermal_mode", "mode"]).map(str::to_string),
+    })
+}
+
+fn get_telemetry(minutes: u32) -> Result<TelemetryData, TelemetryErr> {
+    let url = format!("{}/api/legion/history?minutes={}", base(), minutes);
+    let value: Value = match ureq::get(&url).call() {
+        Ok(response) => response
+            .into_json()
+            .map_err(|err| TelemetryErr::Other(format!("respuesta inválida: {err}")))?,
+        Err(ureq::Error::Status(code, response)) => {
+            return Err(TelemetryErr::from_status(
+                code,
+                response.into_string().unwrap_or_default(),
+            ))
+        }
+        Err(_) => return Err(TelemetryErr::Offline),
+    };
+    let mut samples: Vec<TeleSample> = value
+        .get("samples")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().filter_map(parse_sample).collect())
+        .unwrap_or_default();
+    samples.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal));
+    if samples.is_empty() && value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+        if let Some(message) = jstr(&value, &["error", "detail", "message"]) {
+            let message: String = message.trim().chars().take(160).collect();
+            if !message.is_empty() {
+                return Err(TelemetryErr::Other(message));
+            }
+        }
+    }
+    Ok(TelemetryData { samples, minutes })
+}
+
+/// Pide el histórico en un hilo aparte: dibujar nunca bloquea la UI.
+fn refresh_telemetry(shared: &Arc<Mutex<Shared>>, minutes: u32) {
+    {
+        let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.telemetry.loading {
+            return;
+        }
+        guard.telemetry.loading = true;
+        guard.telemetry.attempted = Some(Instant::now());
+    }
+    let shared = shared.clone();
+    thread::spawn(move || {
+        let result = get_telemetry(minutes);
+        {
+            let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+            guard.telemetry.loading = false;
+            guard.telemetry.minutes = minutes;
+            match result {
+                Ok(data) => {
+                    guard.telemetry.data = Some(Arc::new(data));
+                    guard.telemetry.error = None;
+                    guard.telemetry.fetched = Some(Instant::now());
+                }
+                Err(err) => guard.telemetry.error = Some(err),
+            }
+        }
+        // El lazo AUTO viaja en el mismo tick: misma cadencia, un request más.
+        refresh_adaptive(&shared);
+    });
+}
+
+/// Epoch → fecha civil UTC (algoritmo civil_from_days). Sin dependencias de
+/// fecha: el CSV necesita un `utc` legible y el nombre de archivo una marca.
+fn civil_utc(epoch: f64) -> (i64, i64, i64, i64, i64, i64) {
+    let secs = epoch.max(0.0) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (hour, minute, second) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day, hour, minute, second)
+}
+
+fn iso_utc(epoch: f64) -> String {
+    let (y, m, d, h, mi, s) = civil_utc(epoch);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+fn stamp_utc() -> String {
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let (y, m, d, h, mi, s) = civil_utc(epoch);
+    format!("{y:04}{m:02}{d:02}-{h:02}{mi:02}{s:02}")
+}
+
+/// CSV armado por la UI, con el mismo esquema que publica el motor, por si
+/// `/api/legion/export.csv` todavía no existe.
+fn csv_from(samples: &[TeleSample]) -> String {
+    let cell = |v: Option<f64>| match v {
+        Some(v) if v.is_finite() => format!("{v:.2}"),
+        _ => String::new(),
+    };
+    let mut out = String::from(
+        "ts,utc,cpu_temp,gpu_temp,fan1_rpm,fan2_rpm,gpu_power_w,gpu_clock_mhz,thermal_mode\n",
+    );
+    for s in samples {
+        let mode = s.mode.clone().unwrap_or_default().replace(',', ";");
+        out.push_str(&format!(
+            "{:.0},{},{},{},{},{},{},{},{}\n",
+            s.ts,
+            iso_utc(s.ts),
+            cell(s.cpu),
+            cell(s.gpu),
+            cell(s.fan1),
+            cell(s.fan2),
+            cell(s.gpu_w),
+            cell(s.gpu_mhz),
+            mode
+        ));
+    }
+    out
+}
+
+fn write_export(minutes: u32, body: &str) -> std::io::Result<std::path::PathBuf> {
+    let root = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = root.join("Domador").join("exports");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("telemetria-{minutes}m-{}.csv", stamp_utc()));
+    std::fs::write(&path, body.as_bytes())?;
+    Ok(path)
+}
+
+/// Exporta el CSV: primero pregunta al motor; si no publica el endpoint,
+/// escribe lo que la UI ya tiene en memoria (y lo dice en el aviso).
+fn export_telemetry(shared: Arc<Mutex<Shared>>, minutes: u32, samples: Vec<TeleSample>) {
+    thread::spawn(move || {
+        let mut origin = "motor";
+        let fetched = match ureq::get(&format!(
+            "{}/api/legion/export.csv?minutes={}",
+            base(),
+            minutes
+        ))
+        .call()
+        {
+            Ok(response) => response
+                .into_string()
+                .ok()
+                .filter(|text| !text.trim().is_empty()),
+            Err(_) => None,
+        };
+        let body = match fetched {
+            Some(text) => text,
+            None if !samples.is_empty() => {
+                origin = "UI";
+                csv_from(&samples)
+            }
+            None => {
+                let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+                guard.toast = Some(Toast {
+                    text: "No pude exportar: el motor no publica /api/legion/export.csv y no hay muestras en memoria".to_string(),
+                    ok: false,
+                    at: Instant::now(),
+                });
+                return;
+            }
+        };
+        let (text, ok) = match write_export(minutes, &body) {
+            Ok(path) => (
+                format!("CSV guardado ({origin}) en {}", path.display()),
+                true,
+            ),
+            Err(err) => (format!("No pude escribir el CSV: {err}"), false),
+        };
+        let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.toast = Some(Toast {
+            text,
+            ok,
+            at: Instant::now(),
+        });
     });
 }
 
@@ -572,6 +1160,21 @@ fn paint_icon(painter: &egui::Painter, center: Pos2, size: f32, icon: Icon, colo
                     ],
                     stroke,
                 );
+            }
+        }
+        Icon::Fan => {
+            // Impeller de cuatro aspas: carcasa, palas y eje.
+            painter.circle_stroke(center, s * 0.94, mk_stroke(1.2, a(color, 150)));
+            painter.circle_filled(center, s * 0.15, color);
+            let thin = mk_stroke(1.2, a(color, 190));
+            for i in 0..4 {
+                let angle = i as f32 * std::f32::consts::TAU / 4.0 + 0.42;
+                let (sin, cos) = angle.sin_cos();
+                let perp = Vec2::new(-sin, cos);
+                let root = center + Vec2::new(cos * s * 0.2, sin * s * 0.2);
+                let tip = center + Vec2::new(cos * s * 0.7, sin * s * 0.7);
+                painter.line_segment([root, tip], thin);
+                painter.line_segment([tip, tip + perp * s * 0.22], thin);
             }
         }
     }
@@ -1078,6 +1681,12 @@ impl DomadorUi {
             .text_styles
             .insert(egui::TextStyle::Monospace, FontId::monospace(11.5));
         cc.egui_ctx.set_style(style);
+        // QA-TEMP: zoom y pestaña inicial por env, sólo para capturas.
+        if let Ok(zoom) = std::env::var("DOMADOR_QA_ZOOM") {
+            if let Ok(zoom) = zoom.trim().parse::<f32>() {
+                cc.egui_ctx.set_zoom_factor(zoom);
+            }
+        }
 
         let logo = image::load_from_memory(include_bytes!("../../assets/icon-64.png"))
             .ok()
@@ -1092,9 +1701,15 @@ impl DomadorUi {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let poll = shared.clone();
         thread::spawn(move || poll_thread(poll));
+        let legion = shared.clone();
+        thread::spawn(move || legion_thread(legion));
         Self {
             shared,
-            tab: Tab::Processes,
+            tab: if std::env::var("DOMADOR_QA_TAB").as_deref() == Ok("legion") {
+                Tab::Legion
+            } else {
+                Tab::Processes
+            },
             search: String::new(),
             sort: SortState {
                 key: SortBy::Cpu,
@@ -1104,6 +1719,7 @@ impl DomadorUi {
             kill_confirm: None,
             logo,
             focus_search: false,
+            legion_ui: LegionUi::default(),
         }
     }
 
@@ -1434,11 +2050,6 @@ impl DomadorUi {
             .and_then(|v| v.as_array())
             .map(|a| a.len())
             .unwrap_or(0);
-        let uptime = state
-            .as_ref()
-            .and_then(|s| s.pointer("/app/uptime"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
         let online = state.is_some();
 
         egui::SidePanel::left("nav")
@@ -1495,6 +2106,19 @@ impl DomadorUi {
                 {
                     self.tab = Tab::Settings;
                 }
+                if nav_item(
+                    ui,
+                    compact,
+                    self.tab == Tab::Legion,
+                    Icon::Fan,
+                    "Legion",
+                    "4",
+                    item_width,
+                )
+                .clicked()
+                {
+                    self.tab = Tab::Legion;
+                }
 
                 ui.add_space(18.0);
                 let line = ui.available_width();
@@ -1503,27 +2127,6 @@ impl DomadorUi {
                 ui.add_space(14.0);
 
                 if !compact {
-                    eyebrow(ui, "Motor");
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        dot(ui, if online { OK } else { DANGER }, 3.5);
-                        ui.label(
-                            RichText::new(if online { "En línea" } else { "Sin conexión" })
-                                .size(11.0)
-                                .color(if online { TEXT } else { DANGER }),
-                        );
-                    });
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new(if online {
-                            format!("arriba {}", fmt_uptime(uptime))
-                        } else {
-                            "arrancalo con domador run".to_string()
-                        })
-                        .size(9.5)
-                        .color(FAINT),
-                    );
-                    ui.add_space(14.0);
                     eyebrow(ui, "Estado");
                     ui.add_space(6.0);
                     side_kv(ui, "Procesos", &procs.to_string());
@@ -1555,7 +2158,7 @@ impl DomadorUi {
 
                 ui.with_layout(egui::Layout::bottom_up(Align::LEFT), |ui| {
                     ui.label(
-                        RichText::new(format!("127.0.0.1:{PORT}"))
+                        RichText::new(format!("127.0.0.1:{}", port()))
                             .size(9.0)
                             .monospace()
                             .color(FAINT),
@@ -1656,7 +2259,7 @@ impl DomadorUi {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let (find, refresh, one, two, three, escape) = ctx.input(|i| {
+        let (find, refresh, one, two, three, four, escape) = ctx.input(|i| {
             let cmd = i.modifiers.command;
             (
                 cmd && i.key_pressed(egui::Key::F),
@@ -1664,6 +2267,7 @@ impl DomadorUi {
                 cmd && i.key_pressed(egui::Key::Num1),
                 cmd && i.key_pressed(egui::Key::Num2),
                 cmd && i.key_pressed(egui::Key::Num3),
+                cmd && i.key_pressed(egui::Key::Num4),
                 i.key_pressed(egui::Key::Escape),
             )
         });
@@ -1682,6 +2286,9 @@ impl DomadorUi {
         }
         if three {
             self.tab = Tab::Settings;
+        }
+        if four {
+            self.tab = Tab::Legion;
         }
         if escape
             && self.kill_confirm.is_none()
@@ -1725,6 +2332,18 @@ impl DomadorUi {
                             let width = ui.available_width();
                             ui.set_width(width);
                             self.settings(ui);
+                        });
+                }
+                Tab::Legion => {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                        )
+                        .show(ui, |ui| {
+                            let width = ui.available_width();
+                            ui.set_width(width);
+                            self.legion(ui);
                         });
                 }
             });
@@ -2358,38 +2977,17 @@ impl DomadorUi {
                 ui.allocate_ui_with_layout(
                     Vec2::new(col, 0.0),
                     egui::Layout::top_down(Align::Min),
-                    |ui| kernel_card(ui, col, &state),
+                    |ui| gpu_card(ui, col, &state),
                 );
             });
         } else {
             memory_card(ui, width, &state);
             ui.add_space(12.0);
-            kernel_card(ui, width, &state);
+            gpu_card(ui, width, &state);
         }
 
         ui.add_space(12.0);
-        if width >= 1120.0 {
-            // GPU y memoria privada comparten fila: dos tarjetas acotadas, sin
-            // que ninguna crezca más allá del ancho disponible.
-            let col = ((width - 12.0) / 2.0).floor();
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(col, 0.0),
-                    egui::Layout::top_down(Align::Min),
-                    |ui| gpu_card(ui, col, &state),
-                );
-                ui.add_space(12.0);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(col, 0.0),
-                    egui::Layout::top_down(Align::Min),
-                    |ui| private_card(ui, col, &state),
-                );
-            });
-        } else {
-            gpu_card(ui, width, &state);
-            ui.add_space(12.0);
-            private_card(ui, width, &state);
-        }
+        private_card(ui, width, &state);
         ui.add_space(8.0);
         ui.label(
             RichText::new(
@@ -2503,7 +3101,7 @@ impl DomadorUi {
                     egui::Layout::top_down(Align::Min),
                     |ui| {
                         card(ui, col, |ui| {
-                            section(ui, "Administrador", None);
+                            section(ui, "Motor y permisos", None);
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Estado").size(11.0).color(MUTED));
                                 if admin {
@@ -2525,6 +3123,40 @@ impl DomadorUi {
                                 )
                                 .wrap(),
                             );
+                            if let Some(s) = state.as_ref() {
+                                let version = s
+                                    .pointer("/app/version")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("?");
+                                let path = s
+                                    .pointer("/app/config_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("—");
+                                let tick = fnum(s.pointer("/app/tick_ms/p95"));
+                                ui.add_space(8.0);
+                                kv(ui, "Versión", version, TEXT);
+                                if tick > 0.0 {
+                                    kv(ui, "Tick p95", &format!("{tick:.1} ms"), MUTED);
+                                }
+                                ui.add_space(4.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(
+                                            ellipsize(
+                                                ui,
+                                                path,
+                                                FontId::monospace(9.5),
+                                                (ui.available_width() - 8.0).max(40.0),
+                                            ),
+                                        )
+                                        .monospace()
+                                        .size(9.5)
+                                        .color(MUTED),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(path);
+                            }
                             ui.add_space(10.0);
                             if admin {
                                 if btn(
@@ -2615,26 +3247,419 @@ impl DomadorUi {
         }
 
         ui.add_space(12.0);
-        if width >= 720.0 {
+        shortcuts_card(ui, width);
+    }
+
+    // ------------------------------------------------------------- legion ---
+
+    fn refresh_legion(&self) {
+        let shared = self.shared.clone();
+        thread::spawn(move || {
+            let result = get_legion();
+            let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+            match result {
+                Ok(value) => {
+                    guard.legion.data = Some(Arc::new(value));
+                    guard.legion.error = None;
+                }
+                Err(err) => guard.legion.error = Some(err),
+            }
+        });
+    }
+
+    fn legion_action(&self, path: &'static str, body: Value, busy: String, done: String) {
+        push_legion_action(self.shared.clone(), path, body, busy, done);
+    }
+
+    /// POST del lazo AUTO: manda el parche y relee el estado, sin bloquear.
+    fn adaptive_action(&self, body: Value) {
+        let shared = self.shared.clone();
+        thread::spawn(move || {
+            let result = post("/api/legion/adaptive", body);
+            {
+                let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+                guard.toast = Some(Toast {
+                    text: match &result {
+                        Ok(_) => "AUTO actualizado".to_string(),
+                        Err(err) => friendly_error(err),
+                    },
+                    ok: result.is_ok(),
+                    at: Instant::now(),
+                });
+            }
+            refresh_adaptive(&shared);
+        });
+    }
+
+    /// Aplica lo que pidió el dibujo de telemetría y AUTO. El refresco
+    /// automático vive acá porque esta función sólo corre con la pestaña
+    /// abierta: si el usuario está en Procesos, no se pide nada.
+    fn telemetry_data_actions(
+        &self,
+        tele: &Telemetry,
+        _adaptive: &Adaptive,
+        range: u32,
+        auto: bool,
+        intents: &mut LegionIntent,
+    ) {
+        if intents.tele_export {
+            let samples = tele
+                .data
+                .as_ref()
+                .map(|data| data.samples.clone())
+                .unwrap_or_default();
+            export_telemetry(self.shared.clone(), range, samples);
+        }
+        if intents.adaptive_fetch {
+            // Un hilo aparte: el GET no puede frenar el frame.
+            let shared = self.shared.clone();
+            thread::spawn(move || refresh_adaptive(&shared));
+        }
+        if let Some(body) = intents.adaptive.take() {
+            self.adaptive_action(body);
+        }
+        // 6 s cuando hay datos, 12 s cuando falló (404 incluido): un endpoint
+        // que no existe no se pide en cada frame.
+        let interval = if tele.error.is_some() {
+            Duration::from_secs(12)
+        } else {
+            Duration::from_secs(6)
+        };
+        let due = tele
+            .attempted
+            .map(|at| at.elapsed() >= interval)
+            .unwrap_or(true);
+        let range_changed = tele.minutes != range;
+        if !tele.loading && (intents.tele_fetch || range_changed || (auto && due)) {
+            refresh_telemetry(&self.shared, range);
+        }
+    }
+
+    fn legion(&mut self, ui: &mut egui::Ui) {
+        let (data, err, legion_busy, action, tele, adaptive) = {
+            let guard = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+            (
+                guard.legion.data.clone(),
+                guard.legion.error.clone(),
+                guard.legion.busy.clone(),
+                guard.legion.action.clone(),
+                guard.telemetry.clone(),
+                guard.adaptive.clone(),
+            )
+        };
+        // Los borradores salen de `self` mientras dibujamos para que las
+        // tarjetas no necesiten `&mut self`; vuelven al final.
+        let mut lstate = std::mem::take(&mut self.legion_ui);
+        let mut intents = LegionIntent::default();
+        let busy = self.busy().is_some() || legion_busy.is_some();
+        let state = self.state();
+        let motor = state.is_some();
+        let admin = data
+            .as_deref()
+            .and_then(|d| jbool(d, &["admin"]))
+            .or_else(|| {
+                state
+                    .as_ref()
+                    .and_then(|s| s.pointer("/app/admin"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        let closed = action.as_deref().map(closed_names).unwrap_or_default();
+        let view = data.as_deref().map(LegionView::from);
+        let width = ui.available_width();
+
+        ui.horizontal(|ui| {
+            heading(
+                ui,
+                "Legion",
+                "Ventiladores, modo térmico y límites de CPU por el controlador del equipo.",
+            );
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if btn(ui, "Actualizar", 104.0, 28.0, Btn::Secondary, !busy)
+                    .on_hover_text("Relee /api/legion ahora mismo")
+                    .clicked()
+                {
+                    intents.refresh = true;
+                }
+                if admin {
+                    badge(ui, "ADMIN", OK, a(OK, 26));
+                } else {
+                    badge(ui, "SIN ADMIN", WARN, a(WARN, 24));
+                }
+            });
+        });
+        ui.add_space(8.0);
+        if let Some(view) = view.as_ref() {
+            let cpu = view
+                .temp_cpu
+                .map(|v| format!("{v:.0} °C"))
+                .unwrap_or_else(|| "—".to_string());
+            let gpu = view
+                .temp_gpu
+                .map(|v| format!("{v:.0} °C"))
+                .unwrap_or_else(|| "—".to_string());
+            ui.horizontal(|ui| {
+                dot(ui, if view.available { OK } else { WARN }, 3.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "{} · BIOS {} · CPU {cpu} · GPU {gpu} · {} fans · {}",
+                            view.model,
+                            view.bios,
+                            view.fans.len(),
+                            if view.available {
+                                "WMI OK"
+                            } else {
+                                "WMI limitado"
+                            }
+                        ))
+                        .size(10.0)
+                        .color(MUTED),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(format!(
+                    "{} · BIOS {} · {}{}",
+                    view.model,
+                    view.bios,
+                    if admin { "ADMIN" } else { "SIN ADMIN" },
+                    view.note
+                        .as_deref()
+                        .map(|n| format!(" · {n}"))
+                        .unwrap_or_default()
+                ));
+            });
+        }
+        ui.add_space(12.0);
+
+        // Avisos: primero lo que bloquea, después lo que informa.
+        if !motor {
+            notice(
+                ui,
+                width,
+                "Motor sin conexión",
+                "La UI no encuentra el motor en 127.0.0.1:8787. Arrancalo con `domador run --no-open`: la pestaña se llena sola cuando responda.",
+                DANGER,
+            );
+            ui.add_space(10.0);
+        }
+        if let Some(err) = &err {
+            notice(ui, width, err.title(), &err.body(), err.color());
+            ui.add_space(10.0);
+        }
+        if motor && !admin {
+            admin_notice(ui, width, busy, &mut intents);
+            ui.add_space(10.0);
+        } else if let Some(view) = &view {
+            if !view.available {
+                notice(
+                    ui,
+                    width,
+                    "WMI del EC no disponible",
+                    "El motor responde pero Windows no expone el controlador del EC: no hay RPM ni límites que leer. Los controles quedan apagados para no mandar órdenes a ciegas.",
+                    WARN,
+                );
+                ui.add_space(10.0);
+            }
+            if let Some(note) = view.note.as_deref() {
+                notice(ui, width, "El EC reportó una advertencia", note, COPPER_HI);
+                ui.add_space(10.0);
+            }
+        }
+
+        let Some(view) = view.as_ref() else {
+            legion_preview(ui, width);
+            ui.add_space(12.0);
+            // La telemetría y el lazo AUTO no dependen de `/api/legion`: se
+            // dibujan igual para que la pestaña sirva aunque el panel del EC
+            // todavía no exista.
+            legion_analysis_section(ui, width, &adaptive, &tele, &mut lstate, &mut intents);
+            if intents.elevate {
+                self.relaunch_admin();
+            }
+            if intents.refresh {
+                self.refresh_legion();
+            }
+            self.telemetry_data_actions(
+                &tele,
+                &adaptive,
+                lstate.tele_range,
+                lstate.tele_auto,
+                &mut intents,
+            );
+            self.legion_ui = lstate;
+            return;
+        };
+
+        // Sincronizamos los borradores con el EC salvo que el usuario esté
+        // editando: así el polling no le borra lo que acaba de mover.
+        if !lstate.cpu_edited {
+            lstate.cpu_long = view.long.value;
+            lstate.cpu_short = view.short.value;
+        }
+        if !lstate.curve_edited {
+            for (i, slot) in lstate.curve.iter_mut().enumerate() {
+                *slot = view.table.get(i).copied().unwrap_or(5).clamp(1, 10);
+            }
+        }
+        // El lazo AUTO se sincroniza igual, salvo que el usuario esté moviendo
+        // los escalones o el endpoint todavía no exista (404).
+        let adaptive_pending = adaptive
+            .error
+            .as_ref()
+            .map(|err| err.pending())
+            .unwrap_or(false);
+        if !adaptive_pending && !lstate.ad_edited {
+            if let Some(data) = adaptive.data.as_deref() {
+                lstate.ad_enabled = data.enabled;
+                lstate.ad_target = data.target_c.clamp(60, 100);
+                lstate.ad_hot = data.hot_c.clamp(65, 105);
+                lstate.ad_critical = data.critical_c.clamp(70, 110);
+            }
+        }
+        let enabled = !busy && admin && view.available;
+
+        if width >= 760.0 {
             let col = ((width - 12.0) / 2.0).floor();
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(
                     Vec2::new(col, 0.0),
                     egui::Layout::top_down(Align::Min),
-                    |ui| motor_card(ui, col, state.as_deref()),
+                    |ui| {
+                        legion_thermal_card(ui, col, view, &mut intents, enabled);
+                        ui.add_space(12.0);
+                        legion_fans_card(ui, col, view, &mut intents, enabled);
+                    },
                 );
                 ui.add_space(12.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(col, 0.0),
                     egui::Layout::top_down(Align::Min),
-                    |ui| shortcuts_card(ui, col),
+                    |ui| {
+                        legion_cpu_card(ui, col, view, &mut lstate, &mut intents, enabled);
+                    },
                 );
             });
         } else {
-            motor_card(ui, width, state.as_deref());
+            legion_thermal_card(ui, width, view, &mut intents, enabled);
             ui.add_space(12.0);
-            shortcuts_card(ui, width);
+            legion_fans_card(ui, width, view, &mut intents, enabled);
+            ui.add_space(12.0);
+            legion_cpu_card(ui, width, view, &mut lstate, &mut intents, enabled);
         }
+
+        ui.add_space(10.0);
+        egui::CollapsingHeader::new("Avanzado · curva de fans y restauración")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+                legion_curve_card(ui, width, view, &mut lstate, &mut intents, enabled);
+                ui.add_space(12.0);
+                legion_restore_strip(ui, width, &mut lstate, &mut intents, enabled);
+            });
+
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new("Modo Jefe · quién manda en el EC")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+                legion_chief_card(ui, width, view, &closed, &mut intents, enabled);
+            });
+
+        ui.add_space(8.0);
+        legion_analysis_section(ui, width, &adaptive, &tele, &mut lstate, &mut intents);
+
+        // Recién acá se disparan las acciones: el dibujo nunca manda requests.
+        self.telemetry_data_actions(
+            &tele,
+            &adaptive,
+            lstate.tele_range,
+            lstate.tele_auto,
+            &mut intents,
+        );
+        if intents.elevate {
+            self.relaunch_admin();
+        }
+        if intents.refresh {
+            self.refresh_legion();
+        }
+        if let Some(mode) = intents.thermal {
+            let label = view
+                .modes
+                .iter()
+                .find(|(id, _)| *id == mode)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| pretty(&mode));
+            self.legion_action(
+                "/api/legion/thermal",
+                json!({ "mode": mode }),
+                format!("Cambiando a modo {label}"),
+                format!("Modo térmico: {label}"),
+            );
+        }
+        if let Some(full) = intents.full_speed {
+            self.legion_action(
+                "/api/legion/fans",
+                json!({ "full_speed": full }),
+                if full {
+                    "Subiendo ventiladores al máximo".to_string()
+                } else {
+                    "Soltando full speed".to_string()
+                },
+                if full {
+                    "Máxima refrigeración activa".to_string()
+                } else {
+                    "Full speed apagado".to_string()
+                },
+            );
+        }
+        if let Some((long, short)) = intents.cpu {
+            self.legion_action(
+                "/api/legion/cpu",
+                json!({ "long": long, "short": short }),
+                format!("Aplicando {long} W / {short} W"),
+                format!("Límites: {long} W largo · {short} W corto"),
+            );
+            lstate.cpu_edited = false;
+            lstate.pending_cpu = None;
+        }
+        if let Some(table) = intents.curve {
+            self.legion_action(
+                "/api/legion/fans",
+                json!({ "table": table }),
+                "Aplicando curva de ventiladores".to_string(),
+                "Curva de ventiladores aplicada".to_string(),
+            );
+            lstate.curve_edited = false;
+        }
+        if let Some(on) = intents.chief {
+            self.legion_action(
+                "/api/legion/chief",
+                json!({ "enabled": on }),
+                if on {
+                    "Activando Modo Jefe".to_string()
+                } else {
+                    "Soltando el EC".to_string()
+                },
+                if on {
+                    "Modo Jefe activo: el EC queda para Domador".to_string()
+                } else {
+                    "Modo Jefe apagado".to_string()
+                },
+            );
+        }
+        if intents.restore {
+            self.legion_action(
+                "/api/legion/restore",
+                json!({}),
+                "Restaurando valores de fábrica".to_string(),
+                "Valores de fábrica restaurados".to_string(),
+            );
+            lstate.cpu_edited = false;
+            lstate.curve_edited = false;
+            lstate.confirm_restore = false;
+        }
+        self.legion_ui = lstate;
     }
 
     fn kill_dialog(&mut self, ctx: &egui::Context) {
@@ -3164,9 +4189,31 @@ fn memory_card(ui: &mut egui::Ui, width: f32, state: &Value) {
             &num(mem.and_then(|m| m.get("handles"))).to_string(),
             MUTED,
         );
+        ui.add_space(10.0);
+        ui.label(RichText::new("Kernel y caché").size(10.0).color(FAINT));
+        ui.add_space(6.0);
+        kv(
+            ui,
+            "Pool paginado",
+            &fmt_bytes(num(mem.and_then(|m| m.get("pool_paged")))),
+            MUTED,
+        );
+        kv(
+            ui,
+            "No paginado",
+            &fmt_bytes(num(mem.and_then(|m| m.get("pool_nonpaged")))),
+            MUTED,
+        );
+        kv(
+            ui,
+            "Caché",
+            &fmt_bytes(num(mem.and_then(|m| m.get("cache")))),
+            BRASS,
+        );
     });
 }
 
+#[allow(dead_code)]
 fn kernel_card(ui: &mut egui::Ui, width: f32, state: &Value) {
     let mem = state.pointer("/system/mem");
     card(ui, width, |ui| {
@@ -3378,6 +4425,7 @@ fn private_card(ui: &mut egui::Ui, width: f32, state: &Value) {
     });
 }
 
+#[allow(dead_code)]
 fn motor_card(ui: &mut egui::Ui, width: f32, state: Option<&Value>) {
     card(ui, width, |ui| {
         section(ui, "Motor", Some("127.0.0.1:8787"));
@@ -3514,6 +4562,2566 @@ fn empty_state(ui: &mut egui::Ui, title: &str, body: &str) {
         );
     });
     ui.add_space(10.0);
+}
+
+// ------------------------------------------------------------------ legion ---
+
+#[derive(Clone, Copy)]
+struct Limit {
+    value: i64,
+    min: i64,
+    max: i64,
+    step: i64,
+}
+
+impl Limit {
+    fn parse(value: Option<&Value>, fallback: i64) -> Self {
+        let raw_min = value
+            .and_then(|v| v.get("min"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let raw_max = value
+            .and_then(|v| v.get("max"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(100);
+        let (min, max) = (raw_min.min(raw_max), raw_min.max(raw_max));
+        let step = value
+            .and_then(|v| v.get("step"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1)
+            .max(1);
+        let value = value
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(fallback);
+        Self {
+            value: value.clamp(min, max),
+            min,
+            max,
+            step,
+        }
+    }
+}
+
+struct FanView {
+    id: String,
+    rpm: u32,
+    max: u32,
+}
+
+struct Competitor {
+    name: String,
+    pid: u32,
+    closed: bool,
+}
+
+/// LED del botón de encendido. Es sólo lectura: lo mueve el modo térmico por
+/// el mismo registro del EC que usa Fn+Q, así que no tiene selector propio.
+#[derive(Clone)]
+struct LedInfo {
+    color: Color32,
+    name: &'static str,
+    /// true = el backend no manda el dato y lo dedujimos del modo.
+    derived: bool,
+}
+
+fn led_from_token(raw: &str) -> Option<LedInfo> {
+    let token = raw.trim().to_ascii_lowercase();
+    let (color, name) = match token.as_str() {
+        "blue" | "azul" | "quiet" | "silent" => (Color32::from_rgb(98, 168, 255), "Azul"),
+        "white" | "blanco" | "balance" | "balanced" | "standard" => {
+            (Color32::from_rgb(238, 234, 222), "Blanco")
+        }
+        "red" | "rojo" | "performance" | "turbo" => (Color32::from_rgb(226, 88, 74), "Rojo"),
+        "amber" | "ambar" | "ámbar" | "naranja" | "orange" => {
+            (Color32::from_rgb(232, 176, 92), "Ámbar")
+        }
+        "off" | "apagado" | "disabled" => (Color32::from_rgb(110, 100, 90), "Apagado"),
+        _ => return None,
+    };
+    Some(LedInfo {
+        color,
+        name,
+        derived: false,
+    })
+}
+
+/// Quiet = azul, Balanced = blanco, Performance = rojo, Custom = lo que diga
+/// el firmware. Se usa cuando el backend no publica el campo del LED.
+fn led_for_mode(mode: &str) -> LedInfo {
+    let mode = mode.trim().to_ascii_lowercase();
+    let (color, name) = match mode.as_str() {
+        "quiet" | "silent" => (Color32::from_rgb(98, 168, 255), "Azul"),
+        "balance" | "balanced" | "standard" | "" => (Color32::from_rgb(238, 234, 222), "Blanco"),
+        "performance" | "turbo" => (Color32::from_rgb(226, 88, 74), "Rojo"),
+        _ => (BRASS, "Según firmware"),
+    };
+    LedInfo {
+        color,
+        name,
+        derived: true,
+    }
+}
+
+fn parse_led(data: &Value, thermal_id: &str) -> LedInfo {
+    // El backend puede publicar el LED como objeto (`power_led`) o como texto
+    // suelto; si no publica nada, el color se deduce del modo térmico.
+    if let Some(led) = data.get("power_led") {
+        if let Some(raw) = led.as_str() {
+            if let Some(info) = led_from_token(raw) {
+                return info;
+            }
+        }
+        if let Some(object) = led.as_object() {
+            for key in ["color", "name", "label", "state", "mode"] {
+                if let Some(raw) = object.get(key).and_then(|v| v.as_str()) {
+                    if let Some(info) = led_from_token(raw) {
+                        return info;
+                    }
+                }
+            }
+        }
+    }
+    let raw = jstr(data, &["led", "led_color", "led_mode"])
+        .or_else(|| data.pointer("/led/color").and_then(|v| v.as_str()))
+        .or_else(|| data.pointer("/thermal/led").and_then(|v| v.as_str()));
+    match raw.and_then(led_from_token) {
+        Some(info) => info,
+        None => led_for_mode(thermal_id),
+    }
+}
+
+/// Vista tipada de `/api/legion`. Todo lo que falte cae a un valor neutro:
+/// la pestaña tiene que poder dibujarse con un backend a medio hacer.
+struct LegionView {
+    available: bool,
+    model: String,
+    bios: String,
+    thermal_id: String,
+    thermal_label: String,
+    modes: Vec<(String, String)>,
+    fans: Vec<FanView>,
+    full_speed: bool,
+    temp_cpu: Option<f64>,
+    temp_gpu: Option<f64>,
+    long: Limit,
+    short: Limit,
+    table: Vec<i64>,
+    stock: Vec<i64>,
+    competitors: Vec<Competitor>,
+    chief: bool,
+    note: Option<String>,
+    led: LedInfo,
+}
+
+fn int_list(value: Option<&Value>) -> Vec<i64> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_i64()).collect())
+        .unwrap_or_default()
+}
+
+fn pretty(id: &str) -> String {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+impl LegionView {
+    fn from(data: &Value) -> Self {
+        let mut modes: Vec<(String, String)> = data
+            .get("modes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|mode| {
+                        let id = jstr(mode, &["id", "mode"])?.to_string();
+                        let label = jstr(mode, &["label"])
+                            .map(str::to_string)
+                            .unwrap_or_else(|| pretty(&id));
+                        Some((id, label))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if modes.is_empty() {
+            modes = vec![
+                ("quiet".to_string(), "Silencioso".to_string()),
+                ("balance".to_string(), "Equilibrado".to_string()),
+                ("performance".to_string(), "Rendimiento".to_string()),
+                ("custom".to_string(), "Personalizado".to_string()),
+            ];
+        }
+        let thermal = data.get("thermal");
+        let thermal_id = thermal
+            .and_then(|t| jstr(t, &["id", "mode"]))
+            .unwrap_or("")
+            .to_string();
+        let thermal_label = thermal
+            .and_then(|t| jstr(t, &["label"]))
+            .map(str::to_string)
+            .or_else(|| {
+                modes
+                    .iter()
+                    .find(|(id, _)| *id == thermal_id)
+                    .map(|(_, label)| label.clone())
+            })
+            .unwrap_or_else(|| "—".to_string());
+        let fans = data
+            .get("fans")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|fan| {
+                        let id = jstr(fan, &["id", "name"])?.to_string();
+                        Some(FanView {
+                            id,
+                            rpm: num(fan.get("rpm")) as u32,
+                            max: num(fan.get("max")) as u32,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let competitors = data
+            .get("competitors")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        let name = jstr(c, &["name", "process"])?.to_string();
+                        Some(Competitor {
+                            name,
+                            pid: num(c.get("pid")) as u32,
+                            closed: jbool(c, &["closed", "killed"]).unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            available: jbool(data, &["available"]).unwrap_or(true),
+            model: jstr(data, &["model"]).unwrap_or("—").to_string(),
+            bios: jstr(data, &["bios"]).unwrap_or("—").to_string(),
+            led: parse_led(data, &thermal_id),
+            thermal_id,
+            thermal_label,
+            modes,
+            fans,
+            full_speed: jbool(data, &["full_speed"]).unwrap_or(false),
+            temp_cpu: data.pointer("/temps/cpu").and_then(|v| v.as_f64()),
+            temp_gpu: data.pointer("/temps/gpu").and_then(|v| v.as_f64()),
+            long: Limit::parse(data.pointer("/cpu/long"), 0),
+            short: Limit::parse(data.pointer("/cpu/short"), 0),
+            table: int_list(data.get("fan_table")),
+            stock: int_list(data.get("fan_table_stock")),
+            competitors,
+            chief: jbool(data, &["chief"]).unwrap_or(false),
+            note: jstr(data, &["error"]).map(str::to_string),
+        }
+    }
+}
+
+/// Aviso de color con remaches: mismo lenguaje que las tarjetas.
+fn notice(ui: &mut egui::Ui, width: f32, title: &str, body: &str, color: Color32) {
+    let frame = egui::Frame::new()
+        .fill(a(color, 16))
+        .stroke(mk_stroke(1.0, a(color, 110)))
+        .corner_radius(9.0)
+        .inner_margin(Margin::symmetric(13, 10))
+        .show(ui, |ui| {
+            let inner = (width - 26.0).max(80.0);
+            ui.set_width(inner);
+            ui.set_max_width(inner);
+            ui.horizontal(|ui| {
+                dot(ui, color, 4.0);
+                ui.label(RichText::new(title).size(12.0).strong().color(color));
+            });
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new(body).size(10.5).color(MUTED)).wrap());
+        });
+    rivets(ui, frame.response.rect);
+}
+
+fn admin_notice(ui: &mut egui::Ui, width: f32, busy: bool, intents: &mut LegionIntent) {
+    let frame = egui::Frame::new()
+        .fill(a(WARN, 16))
+        .stroke(mk_stroke(1.0, a(WARN, 110)))
+        .corner_radius(9.0)
+        .inner_margin(Margin::symmetric(13, 10))
+        .show(ui, |ui| {
+            let inner = (width - 26.0).max(80.0);
+            ui.set_width(inner);
+            ui.set_max_width(inner);
+            ui.horizontal(|ui| {
+                dot(ui, WARN, 4.0);
+                ui.label(RichText::new("Falta administrador").size(12.0).strong().color(WARN));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if btn(ui, "Elevar", 84.0, 24.0, Btn::Secondary, !busy)
+                        .on_hover_text("Reinicia la UI con UAC; el control del EC exige elevación")
+                        .clicked()
+                    {
+                        intents.elevate = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Leer y escribir el EC pide sesión elevada. Los controles de esta pestaña quedan apagados hasta que eleves la UI.",
+                    )
+                    .size(10.5)
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+        });
+    rivets(ui, frame.response.rect);
+}
+
+/// Botones de opción en filas que se reacomodan solas: nunca desbordan el
+/// ancho disponible ni dependen de `ui.columns`.
+fn option_grid(
+    ui: &mut egui::Ui,
+    items: &[(&str, bool)],
+    min_cell: f32,
+    height: f32,
+    enabled: bool,
+) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+    let avail = ui.available_width().max(80.0);
+    let gap = 6.0;
+    let mut per_row = items.len();
+    while per_row > 1 {
+        let cell = (avail - gap * (per_row as f32 - 1.0)) / per_row as f32;
+        if cell >= min_cell {
+            break;
+        }
+        per_row -= 1;
+    }
+    let cell = ((avail - gap * (per_row as f32 - 1.0)) / per_row as f32)
+        .floor()
+        .max(52.0);
+    let mut clicked = None;
+    let rows = items.len().div_ceil(per_row);
+    for row in 0..rows {
+        if row > 0 {
+            ui.add_space(gap);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (idx, (label, active)) in items.iter().enumerate().skip(row * per_row).take(per_row)
+            {
+                let kind = if *active {
+                    Btn::Primary
+                } else {
+                    Btn::Secondary
+                };
+                if btn(ui, label, cell, height, kind, enabled).clicked() && enabled {
+                    clicked = Some(idx);
+                }
+            }
+        });
+    }
+    clicked
+}
+
+/// Slider steampunk: pista hundida, muescas y perilla de latón.
+fn brass_slider(
+    ui: &mut egui::Ui,
+    value: &mut i64,
+    min: i64,
+    max: i64,
+    step: i64,
+    width: f32,
+    enabled: bool,
+) -> Response {
+    let sense = if enabled {
+        Sense::click_and_drag()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width.max(60.0), 22.0), sense);
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 6.0, rect.center().y - 3.0),
+        Pos2::new(rect.right() - 6.0, rect.center().y + 3.0),
+    );
+    let span = (max - min).max(1) as f32;
+    let frac = ((*value - min) as f32 / span).clamp(0.0, 1.0);
+    let painter = ui.painter();
+    painter.rect_filled(track, 3.0, SUNKEN);
+    painter.rect_stroke(track, 3.0, mk_stroke(1.0, BORDER_SOFT), StrokeKind::Inside);
+    if track.width() > 24.0 {
+        for notch in 0..=4 {
+            let x = egui::lerp(track.x_range(), notch as f32 / 4.0);
+            painter.vline(
+                x,
+                (track.top() + 1.0)..=(track.bottom() - 1.0),
+                mk_stroke(1.0, a(BORDER, 120)),
+            );
+        }
+    }
+    let filled = Rect::from_min_max(
+        track.min,
+        Pos2::new(track.left() + track.width() * frac, track.bottom()),
+    );
+    if frac > 0.0 {
+        painter.rect_filled(filled, 3.0, a(BRASS, if enabled { 120 } else { 50 }));
+    }
+    let knob = Pos2::new(track.left() + track.width() * frac, rect.center().y);
+    let hot = enabled && (response.hovered() || response.dragged());
+    painter.circle_filled(knob + Vec2::new(0.0, 1.0), 8.0, a(Color32::BLACK, 70));
+    painter.circle_filled(
+        knob,
+        7.0,
+        if !enabled {
+            FAINT
+        } else if hot {
+            BRASS_HI
+        } else {
+            BRASS
+        },
+    );
+    painter.circle_filled(knob, 2.2, INK);
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let mut response = response;
+    if enabled && (response.dragged() || response.clicked()) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let t = ((pos.x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
+            let raw = min as f32 + t * span;
+            let stepped = ((raw - min as f32) / step as f32).round() * step as f32 + min as f32;
+            let next = (stepped.round() as i64).clamp(min, max);
+            if next != *value {
+                *value = next;
+                response.mark_changed();
+            }
+        }
+    }
+    response
+}
+
+/// Editor de la curva: diez columnas arrastrables, con la curva de fábrica
+/// dibujada como fantasma para comparar.
+fn curve_editor(ui: &mut egui::Ui, values: &mut [i64; 10], stock: &[i64], enabled: bool) -> bool {
+    let width = ui.available_width().max(120.0);
+    let height = 116.0;
+    let sense = if enabled {
+        Sense::click_and_drag()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), sense);
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 8.0, SUNKEN);
+    painter.rect_stroke(rect, 8.0, mk_stroke(1.0, BORDER_SOFT), StrokeKind::Inside);
+    let plot = Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0, rect.top() + 10.0),
+        Pos2::new(rect.right() - 8.0, rect.bottom() - 20.0),
+    );
+    for frac in [0.25_f32, 0.5, 0.75] {
+        let y = egui::lerp(plot.y_range(), 1.0 - frac);
+        painter.hline(plot.x_range(), y, mk_stroke(1.0, a(BORDER, 70)));
+    }
+    let slot = plot.width() / 10.0;
+    let bar_w = (slot * 0.52).clamp(3.0, 26.0);
+    let hovered = response
+        .hover_pos()
+        .map(|pos| (((pos.x - plot.left()) / slot.max(0.01)).floor() as i32).clamp(0, 9) as usize);
+    // Fantasma de la tabla de fábrica.
+    if stock.len() >= 2 {
+        let points: Vec<Pos2> = stock
+            .iter()
+            .take(10)
+            .enumerate()
+            .map(|(i, v)| {
+                let frac = (*v).clamp(1, 10) as f32 / 10.0;
+                Pos2::new(
+                    plot.left() + slot * (i as f32 + 0.5),
+                    plot.bottom() - plot.height() * frac,
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, mk_stroke(1.0, a(MUTED, 120))));
+    }
+    for i in 0..10 {
+        let cx = plot.left() + slot * (i as f32 + 0.5);
+        let frac = values[i].clamp(1, 10) as f32 / 10.0;
+        let h = (plot.height() * frac).max(2.0);
+        let bar = Rect::from_min_max(
+            Pos2::new(cx - bar_w * 0.5, plot.bottom() - h),
+            Pos2::new(cx + bar_w * 0.5, plot.bottom()),
+        );
+        let hot = hovered == Some(i) && enabled;
+        let fill = if !enabled {
+            a(FAINT, 90)
+        } else if hot {
+            BRASS_HI
+        } else {
+            a(BRASS, 190)
+        };
+        painter.rect_filled(bar, 2.0, fill);
+        painter.text(
+            Pos2::new(cx, plot.bottom() + 3.0),
+            Align2::CENTER_TOP,
+            format!("{}", i + 1),
+            FontId::monospace(8.5),
+            FAINT,
+        );
+        if hot {
+            painter.text(
+                Pos2::new(cx, rect.top() + 2.0),
+                Align2::CENTER_TOP,
+                format!("n{}", values[i]),
+                FontId::monospace(9.5),
+                BRASS_HI,
+            );
+        }
+    }
+    if !enabled {
+        return false;
+    }
+    let mut changed = false;
+    if response.dragged() || response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let idx =
+                (((pos.x - plot.left()) / slot.max(0.01)).floor() as i32).clamp(0, 9) as usize;
+            let t = ((plot.bottom() - pos.y) / plot.height().max(1.0)).clamp(0.0, 1.0);
+            // El EC pide niveles enteros de 1 a 10, no porcentajes.
+            let next = (t * 9.0).round() as i64 + 1;
+            let next = next.clamp(1, 10);
+            if values[idx] != next {
+                values[idx] = next;
+                changed = true;
+            }
+        }
+    }
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    changed
+}
+
+fn confirm_strip(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: &str,
+    color: Color32,
+    ok_label: &str,
+    enabled: bool,
+) -> (bool, bool) {
+    let mut confirmed = false;
+    let mut cancelled = false;
+    let width = ui.available_width();
+    let frame = egui::Frame::new()
+        .fill(a(color, 12))
+        .stroke(mk_stroke(1.0, a(color, 80)))
+        .corner_radius(7.0)
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            let inner = (width - 20.0).max(80.0);
+            ui.set_width(inner);
+            ui.set_max_width(inner);
+            ui.label(RichText::new(title).size(11.0).strong().color(color));
+            ui.add_space(2.0);
+            ui.add(egui::Label::new(RichText::new(body).size(10.0).color(MUTED)).wrap());
+            ui.add_space(7.0);
+            ui.horizontal(|ui| {
+                if btn(ui, ok_label, 96.0, 26.0, Btn::Primary, enabled).clicked() && enabled {
+                    confirmed = true;
+                }
+                if btn(ui, "Cancelar", 84.0, 26.0, Btn::Ghost, true).clicked() {
+                    cancelled = true;
+                }
+            });
+        });
+    rivets(ui, frame.response.rect);
+    (confirmed, cancelled)
+}
+
+#[allow(dead_code)]
+fn temp_tile(ui: &mut egui::Ui, width: f32, label: &str, value: Option<f64>) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 52.0), Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 8.0, SUNKEN);
+    painter.rect_stroke(rect, 8.0, mk_stroke(1.0, BORDER_SOFT), StrokeKind::Inside);
+    painter.text(
+        Pos2::new(rect.left() + 10.0, rect.top() + 7.0),
+        Align2::LEFT_TOP,
+        label,
+        FontId::proportional(9.0),
+        FAINT,
+    );
+    let (text, color) = match value {
+        Some(t) => {
+            let color = if t >= 90.0 {
+                DANGER
+            } else if t >= 78.0 {
+                COPPER_HI
+            } else if t >= 65.0 {
+                BRASS
+            } else {
+                OK
+            };
+            (format!("{t:.0}°C"), color)
+        }
+        None => ("—".to_string(), FAINT),
+    };
+    painter.text(
+        Pos2::new(rect.left() + 10.0, rect.top() + 20.0),
+        Align2::LEFT_TOP,
+        text,
+        FontId::monospace(18.0),
+        color,
+    );
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 10.0, rect.bottom() - 12.0),
+        Pos2::new(rect.right() - 10.0, rect.bottom() - 8.0),
+    );
+    painter.rect_filled(track, 2.0, a(BORDER, 90));
+    let frac = (value.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0) as f32;
+    if frac > 0.0 {
+        painter.rect_filled(
+            Rect::from_min_size(track.min, Vec2::new(track.width() * frac, track.height())),
+            2.0,
+            color,
+        );
+    }
+    response.on_hover_text("Temperatura que reporta el EC (no la del sensor de Windows).");
+}
+
+fn fan_row(ui: &mut egui::Ui, name: &str, rpm: u32, max: u32) {
+    let frac = if max > 0 {
+        rpm as f32 / max as f32
+    } else {
+        0.0
+    };
+    let color = if frac >= 0.85 {
+        COPPER_HI
+    } else if frac >= 0.6 {
+        BRASS
+    } else {
+        OK
+    };
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 26.0),
+        egui::Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.add_sized(
+                [(width - 132.0).max(40.0), 26.0],
+                egui::Label::new(RichText::new(name).size(11.0).color(MUTED)).truncate(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(if max > 0 {
+                        format!("/ {max} rpm")
+                    } else {
+                        "/ — rpm".to_string()
+                    })
+                    .size(9.5)
+                    .monospace()
+                    .color(FAINT),
+                );
+                ui.label(
+                    RichText::new(format!("{rpm}"))
+                        .size(15.0)
+                        .monospace()
+                        .strong()
+                        .color(color),
+                );
+            });
+        },
+    );
+    meter(ui, frac, color);
+}
+
+fn legion_analysis_section(
+    ui: &mut egui::Ui,
+    width: f32,
+    adaptive: &Adaptive,
+    tele: &Telemetry,
+    lstate: &mut LegionUi,
+    intents: &mut LegionIntent,
+) {
+    egui::CollapsingHeader::new("Análisis · temperatura, fans y modo automático")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_space(6.0);
+            if width >= 860.0 {
+                let left = (width * 0.36).floor().max(320.0);
+                let right = (width - left - 12.0).max(320.0);
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left, 0.0),
+                        egui::Layout::top_down(Align::Min),
+                        |ui| legion_adaptive_card(ui, left, adaptive, lstate, intents),
+                    );
+                    ui.add_space(12.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(right, 0.0),
+                        egui::Layout::top_down(Align::Min),
+                        |ui| legion_telemetry_card(ui, right, tele, lstate, intents),
+                    );
+                });
+            } else {
+                legion_adaptive_card(ui, width, adaptive, lstate, intents);
+                ui.add_space(12.0);
+                legion_telemetry_card(ui, width, tele, lstate, intents);
+            }
+        });
+}
+
+#[allow(dead_code)]
+fn legion_equip_card(ui: &mut egui::Ui, width: f32, view: &LegionView, admin: bool) {
+    card(ui, width, |ui| {
+        section(ui, "Equipo", Some("EC"));
+        eyebrow(ui, "Modelo");
+        ui.add_space(2.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(&view.model)
+                    .size(13.0)
+                    .monospace()
+                    .strong()
+                    .color(TEXT),
+            )
+            .wrap(),
+        );
+        ui.add_space(6.0);
+        kv(ui, "BIOS", &view.bios, MUTED);
+        ui.add_space(9.0);
+        ui.horizontal(|ui| {
+            if admin {
+                badge(ui, "ADMIN", OK, a(OK, 26));
+            } else {
+                badge(ui, "SIN ADMIN", WARN, a(WARN, 24));
+            }
+            ui.add_space(5.0);
+            if view.available {
+                badge(ui, "WMI OK", OK, a(OK, 20));
+            } else {
+                badge(ui, "WMI N/D", FAINT, a(FAINT, 20));
+            }
+            if view.full_speed {
+                ui.add_space(5.0);
+                badge(ui, "FULL SPEED", COPPER_HI, a(COPPER_HI, 22));
+            }
+        });
+        ui.add_space(11.0);
+        let inner = ui.available_width();
+        let gap = 8.0;
+        let cell = ((inner - gap) / 2.0).floor().max(60.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            temp_tile(ui, cell, "CPU", view.temp_cpu);
+            temp_tile(ui, cell, "GPU", view.temp_gpu);
+        });
+    });
+}
+
+fn led_row(ui: &mut egui::Ui, led: &LedInfo) {
+    let width = ui.available_width().max(60.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 7.0, SUNKEN);
+    painter.rect_stroke(rect, 7.0, mk_stroke(1.0, BORDER_SOFT), StrokeKind::Inside);
+    let center = Pos2::new(rect.left() + 17.0, rect.center().y);
+    painter.circle_filled(center, 8.0, a(led.color, 34));
+    painter.circle_filled(center, 4.4, led.color);
+    painter.circle_stroke(center, 8.0, mk_stroke(1.0, a(led.color, 140)));
+    painter.text(
+        Pos2::new(rect.left() + 32.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        "LED del botón",
+        FontId::proportional(10.5),
+        MUTED,
+    );
+    let value = if led.derived {
+        format!("{} · deducido", led.name)
+    } else {
+        led.name.to_string()
+    };
+    painter.text(
+        Pos2::new(rect.right() - 10.0, rect.center().y),
+        Align2::RIGHT_CENTER,
+        value,
+        FontId::monospace(10.5),
+        led.color,
+    );
+    response.on_hover_text(
+        "Quiet = azul · Balanced = blanco · Performance = rojo · Custom = lo que fije el firmware. Es informativo: lo mueve el modo térmico, no hay control aparte.",
+    );
+}
+
+fn legion_thermal_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    view: &LegionView,
+    intents: &mut LegionIntent,
+    enabled: bool,
+) {
+    card(ui, width, |ui| {
+        section(ui, "Modo térmico", Some(view.thermal_label.as_str()));
+        let items: Vec<(&str, bool)> = view
+            .modes
+            .iter()
+            .map(|(id, label)| (label.as_str(), id == &view.thermal_id))
+            .collect();
+        if let Some(idx) = option_grid(ui, &items, 86.0, 28.0, enabled) {
+            if let Some((id, _)) = view.modes.get(idx) {
+                intents.thermal = Some(id.clone());
+            }
+        }
+        ui.add_space(9.0);
+        kv(ui, "Activo", &view.thermal_label, BRASS);
+        ui.add_space(7.0);
+        led_row(ui, &view.led);
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(if view.led.derived {
+                    "El EC todavía no publica el LED: el color se deduce del modo térmico. Domador escribe el mismo registro que Fn+Q, así que al cambiar el modo acá el LED del botón hace lo mismo."
+                } else {
+                    "El color lo reporta el EC. Domador escribe el mismo registro que Fn+Q: cambiar el modo acá mueve el LED del botón igual que el atajo del teclado."
+                })
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+        ui.add_space(3.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "El cambio es inmediato: el EC reescribe el registro de la máquina. Si Vantage, Legion Arena o Legion Toolkit están abiertos, van a pelear por el mismo valor.",
+                )
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+    });
+}
+
+fn legion_fans_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    view: &LegionView,
+    intents: &mut LegionIntent,
+    enabled: bool,
+) {
+    card(ui, width, |ui| {
+        section(ui, "Ventiladores", Some("RPM"));
+        if view.fans.is_empty() {
+            ui.label(
+                RichText::new("El EC no reporta ventiladores.")
+                    .size(10.5)
+                    .color(FAINT),
+            );
+        }
+        for fan in &view.fans {
+            fan_row(ui, &fan.id, fan.rpm, fan.max);
+            ui.add_space(3.0);
+        }
+        ui.add_space(7.0);
+        let inner = ui.available_width();
+        ui.allocate_ui_with_layout(
+            Vec2::new(inner, 26.0),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                let response = switch(ui, Id::new("legion-full-speed"), view.full_speed);
+                if response.clicked() && enabled {
+                    intents.full_speed = Some(!view.full_speed);
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new("Máxima refrigeración")
+                        .size(11.5)
+                        .strong()
+                        .color(if view.full_speed { COPPER_HI } else { MUTED }),
+                );
+            },
+        );
+        ui.add_space(3.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Fuerza los dos ventiladores a tope mientras esté activo. Para jugar con curva propia, apagalo y aplicá la tabla de abajo: el EC acepta una cosa por vez.",
+                )
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+    });
+}
+
+fn legion_cpu_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    view: &LegionView,
+    lstate: &mut LegionUi,
+    intents: &mut LegionIntent,
+    enabled: bool,
+) {
+    card(ui, width, |ui| {
+        section(ui, "Límites de CPU", Some("PPT"));
+        let mut changed = false;
+        changed |= limit_row(ui, "Largo (PL1)", &view.long, &mut lstate.cpu_long, enabled);
+        ui.add_space(6.0);
+        changed |= limit_row(
+            ui,
+            "Corto (PL2)",
+            &view.short,
+            &mut lstate.cpu_short,
+            enabled,
+        );
+        if changed {
+            lstate.cpu_edited = true;
+        }
+        ui.add_space(5.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "Rango {}–{} W · paso {} W. El EC acepta vatios enteros; por encima del máximo del BIOS recorta solo.",
+                    view.long.min, view.long.max, view.long.step
+                ))
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+        ui.add_space(11.0);
+        eyebrow(ui, "Presets");
+        ui.add_space(5.0);
+        let presets: [(&str, i64); 3] = [
+            ("Suave 35 W", 35),
+            ("Juego 45 W", 45),
+            ("Rendimiento 65 W", 65),
+        ];
+        let items: Vec<(&str, bool)> = presets
+            .iter()
+            .map(|(label, watts)| (*label, lstate.cpu_long == *watts && !lstate.cpu_edited))
+            .collect();
+        if let Some(idx) = option_grid(ui, &items, 92.0, 26.0, enabled) {
+            let target = presets[idx].1;
+            let long = target.clamp(view.long.min, view.long.max);
+            let short =
+                ((target as f64 * 1.25).round() as i64).clamp(view.short.min, view.short.max);
+            lstate.pending_cpu = Some((long, short, presets[idx].0.to_string()));
+        }
+        if lstate.cpu_edited {
+            ui.add_space(7.0);
+            if btn(
+                ui,
+                "Revisar ajuste manual",
+                ui.available_width(),
+                26.0,
+                Btn::Secondary,
+                enabled,
+            )
+            .clicked()
+            {
+                lstate.pending_cpu = Some((
+                    lstate.cpu_long,
+                    lstate.cpu_short,
+                    "ajuste manual".to_string(),
+                ));
+            }
+        }
+        if let Some((long, short, why)) = lstate.pending_cpu.clone() {
+            ui.add_space(10.0);
+            let (ok, cancel) = confirm_strip(
+                ui,
+                "Confirmar límites",
+                &format!(
+                    "{long} W de largo · {short} W de corto ({why}). El EC lo aplica al instante y puede bajar el rendimiento sostenido."
+                ),
+                WARN,
+                "Aplicar",
+                enabled,
+            );
+            if ok {
+                intents.cpu = Some((long, short));
+                lstate.pending_cpu = None;
+            }
+            if cancel {
+                lstate.pending_cpu = None;
+            }
+        }
+    });
+}
+
+fn limit_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    limit: &Limit,
+    value: &mut i64,
+    enabled: bool,
+) -> bool {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 20.0),
+        egui::Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.add_sized(
+                [(width - 96.0).max(40.0), 20.0],
+                egui::Label::new(RichText::new(label).size(10.5).color(MUTED)).truncate(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{value} W"))
+                        .size(13.0)
+                        .monospace()
+                        .strong()
+                        .color(if enabled { BRASS } else { FAINT }),
+                );
+            });
+        },
+    );
+    ui.add_space(3.0);
+    let response = brass_slider(ui, value, limit.min, limit.max, limit.step, width, enabled);
+    response.changed()
+}
+
+fn legion_curve_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    view: &LegionView,
+    lstate: &mut LegionUi,
+    intents: &mut LegionIntent,
+    enabled: bool,
+) {
+    card(ui, width, |ui| {
+        section(ui, "Curva de ventiladores", Some("10 puntos"));
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Punto 1 = régimen más frío, punto 10 = más caliente. La altura es el nivel de duty que Domador le pide al EC (1 = mínimo, 10 = tope); la línea tenue es la tabla de fábrica.",
+                )
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+        ui.add_space(8.0);
+        if curve_editor(ui, &mut lstate.curve, &view.stock, enabled) {
+            lstate.curve_edited = true;
+        }
+        ui.add_space(10.0);
+        let presets: [(&str, [i64; 10]); 4] = [
+            ("Silencioso", [2, 2, 3, 3, 4, 4, 5, 6, 7, 8]),
+            ("Equilibrado", [3, 3, 4, 4, 5, 5, 6, 7, 8, 9]),
+            ("Agresivo", [4, 5, 5, 6, 7, 8, 8, 9, 10, 10]),
+            ("Full blast", [10; 10]),
+        ];
+        let items: Vec<(&str, bool)> = presets
+            .iter()
+            .map(|(label, table)| (*label, lstate.curve == *table && !lstate.curve_edited))
+            .collect();
+        if let Some(idx) = option_grid(ui, &items, 84.0, 26.0, enabled) {
+            lstate.curve = presets[idx].1;
+            lstate.curve_edited = true;
+        }
+        ui.add_space(10.0);
+        let inner = ui.available_width();
+        ui.allocate_ui_with_layout(
+            Vec2::new(inner, 28.0),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                if btn(
+                    ui,
+                    "Aplicar curva",
+                    128.0,
+                    28.0,
+                    Btn::Primary,
+                    enabled && lstate.curve_edited,
+                )
+                .on_hover_text("Manda los diez puntos a /api/legion/fans")
+                .clicked()
+                {
+                    intents.curve = Some(lstate.curve.to_vec());
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(if lstate.curve_edited {
+                        "Hay cambios sin aplicar"
+                    } else {
+                        "Curva en sincronía con el EC"
+                    })
+                    .size(10.0)
+                    .color(if lstate.curve_edited { WARN } else { FAINT }),
+                );
+            },
+        );
+    });
+}
+
+fn competitor_row(ui: &mut egui::Ui, competitor: &Competitor, closed: bool, chief: bool) {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 22.0),
+        egui::Layout::left_to_right(Align::Center),
+        |ui| {
+            dot(ui, if closed { OK } else { WARN }, 3.0);
+            ui.add_space(2.0);
+            ui.add_sized(
+                [(width - 156.0).max(40.0), 22.0],
+                egui::Label::new(RichText::new(&competitor.name).size(11.0).color(if closed {
+                    MUTED
+                } else {
+                    TEXT
+                }))
+                .truncate(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if closed {
+                    badge(ui, "CERRADO", OK, a(OK, 22));
+                } else if chief {
+                    badge(ui, "A CERRAR", WARN, a(WARN, 22));
+                } else {
+                    badge(ui, "ABIERTO", WARN, a(WARN, 22));
+                }
+                ui.label(
+                    RichText::new(format!("PID {}", competitor.pid))
+                        .size(9.5)
+                        .monospace()
+                        .color(FAINT),
+                );
+            });
+        },
+    );
+}
+
+fn legion_chief_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    view: &LegionView,
+    closed: &[String],
+    intents: &mut LegionIntent,
+    enabled: bool,
+) {
+    card(ui, width, |ui| {
+        section(ui, "Modo Jefe", Some("cerrojo del EC"));
+        let inner = ui.available_width();
+        ui.allocate_ui_with_layout(
+            Vec2::new(inner, 30.0),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                let response = switch(ui, Id::new("legion-chief"), view.chief);
+                if response.clicked() && enabled {
+                    intents.chief = Some(!view.chief);
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(if view.chief {
+                        "Domador manda"
+                    } else {
+                        "Modo Jefe apagado"
+                    })
+                    .size(12.5)
+                    .strong()
+                    .color(if view.chief { BRASS } else { MUTED }),
+                );
+            },
+        );
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Domador activo = jefe de todo lo demás. Con el Modo Jefe prendido, Domador cierra Vantage, Legion Arena, Legion Toolkit (LLT), LFC, UXTU y Ryzen Controller: todos escriben el mismo registro del EC, y mientras estén abiertos se pisan entre sí y el modo térmico salta solo.",
+                )
+                .size(10.5)
+                .color(MUTED),
+            )
+            .wrap(),
+        );
+        ui.add_space(10.0);
+        eyebrow(ui, "Competidores detectados");
+        ui.add_space(5.0);
+        if view.competitors.is_empty() {
+            ui.horizontal(|ui| {
+                dot(ui, OK, 3.0);
+                ui.label(
+                    RichText::new("Ninguno corriendo: el EC queda sólo para Domador.")
+                        .size(10.5)
+                        .color(MUTED),
+                );
+            });
+        } else {
+            for competitor in &view.competitors {
+                let was_closed = competitor.closed
+                    || closed
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&competitor.name));
+                competitor_row(ui, competitor, was_closed, view.chief);
+                ui.add_space(2.0);
+            }
+        }
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "El cierre es de proceso, no de instalación: si Windows o el usuario los vuelve a abrir, Modo Jefe los cierra otra vez en el siguiente tick.",
+                )
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+    });
+}
+
+fn legion_restore_strip(
+    ui: &mut egui::Ui,
+    width: f32,
+    lstate: &mut LegionUi,
+    intents: &mut LegionIntent,
+    enabled: bool,
+) {
+    let frame = egui::Frame::new()
+        .fill(a(COPPER, 10))
+        .stroke(mk_stroke(1.0, a(COPPER, 90)))
+        .corner_radius(9.0)
+        .inner_margin(Margin::symmetric(13, 11))
+        .show(ui, |ui| {
+            let inner = (width - 26.0).max(80.0);
+            ui.set_width(inner);
+            ui.set_max_width(inner);
+            if lstate.confirm_restore {
+                let (ok, cancel) = confirm_strip(
+                    ui,
+                    "Volver a valores de fábrica",
+                    "Se resetean modo térmico, curva, full speed y límites de CPU a lo que reporta el EC de fábrica. Es el botón de pánico si algo quedó raro.",
+                    COPPER,
+                    "Restaurar",
+                    enabled,
+                );
+                if ok {
+                    intents.restore = true;
+                }
+                if cancel {
+                    lstate.confirm_restore = false;
+                }
+            } else {
+                ui.horizontal(|ui| {
+                    let text_w = (inner - 168.0).max(120.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(text_w, 0.0),
+                        egui::Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.label(RichText::new("Restaurar stock").size(12.0).strong().color(TEXT));
+                            ui.add_space(2.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(
+                                        "Devuelve térmica, curva y límites a los valores de fábrica del EC.",
+                                    )
+                                    .size(10.0)
+                                    .color(MUTED),
+                                )
+                                .wrap(),
+                            );
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if btn(ui, "Restaurar stock", 148.0, 28.0, Btn::Danger, enabled)
+                            .on_hover_text("POST /api/legion/restore · pide confirmación")
+                            .clicked()
+                        {
+                            lstate.confirm_restore = true;
+                        }
+                    });
+                });
+            }
+        });
+    rivets(ui, frame.response.rect);
+}
+
+// ----------------------------------------------------------- modo auto EC ---
+
+/// Estado de `/api/legion/adaptive`: el lazo que mira la temperatura y mueve
+/// ventiladores y modo térmico por escalones con histéresis. La UI no decide
+/// nada: muestra lo que hace el motor y le manda los límites que el usuario
+/// toca.
+#[derive(Clone)]
+struct AdaptiveData {
+    enabled: bool,
+    target_c: i64,
+    hot_c: i64,
+    critical_c: i64,
+    dwell_s: Option<f64>,
+    cooldown_s: Option<f64>,
+    state: String,
+    last_action: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum AdaptiveErr {
+    /// 404: el motor todavía no publica el lazo.
+    Pending,
+    Offline,
+    Other(String),
+}
+
+impl AdaptiveErr {
+    fn from_status(code: u16, body: String) -> Self {
+        match code {
+            404 => Self::Pending,
+            _ => {
+                let body: String = body.trim().chars().take(140).collect();
+                if body.is_empty() {
+                    Self::Other(format!("HTTP {code}"))
+                } else {
+                    Self::Other(format!("HTTP {code} · {body}"))
+                }
+            }
+        }
+    }
+
+    fn pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Pending => "Backend pendiente",
+            Self::Offline => "Motor sin conexión",
+            Self::Other(_) => "El lazo devolvió un error",
+        }
+    }
+
+    fn body(&self) -> String {
+        match self {
+            Self::Pending => "GET /api/legion/adaptive responde 404: el motor todavía no publica el piloto automático. La tarjeta queda armada con los valores por defecto (82 / 85 / 92 °C) y se habilita sola cuando exista el lazo.".into(),
+            Self::Offline => "No hay respuesta en el motor local. Arrancalo con `domador run --no-open` y reintentá.".into(),
+            Self::Other(text) => text.clone(),
+        }
+    }
+
+    fn color(&self) -> Color32 {
+        match self {
+            Self::Pending => WARN,
+            Self::Offline => DANGER,
+            Self::Other(_) => COPPER_HI,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct Adaptive {
+    data: Option<Arc<AdaptiveData>>,
+    error: Option<AdaptiveErr>,
+}
+
+fn get_adaptive() -> Result<AdaptiveData, AdaptiveErr> {
+    match ureq::get(&format!("{}/api/legion/adaptive", base())).call() {
+        Ok(response) => {
+            let value: Value = response
+                .into_json()
+                .map_err(|err| AdaptiveErr::Other(format!("respuesta inválida: {err}")))?;
+            Ok(AdaptiveData {
+                enabled: jbool(&value, &["enabled", "on", "active"]).unwrap_or(false),
+                target_c: sample_num(&value, &["target_c", "target"]).unwrap_or(82.0) as i64,
+                hot_c: sample_num(&value, &["hot_c", "hot"]).unwrap_or(85.0) as i64,
+                critical_c: sample_num(&value, &["critical_c", "critical"]).unwrap_or(92.0) as i64,
+                dwell_s: sample_num(&value, &["dwell_s", "dwell", "hysteresis_s"]),
+                cooldown_s: sample_num(&value, &["cooldown_s", "cooldown"]),
+                state: jstr(&value, &["state", "level", "stage"])
+                    .unwrap_or("normal")
+                    .to_ascii_lowercase(),
+                last_action: jstr(&value, &["last_action", "action"]).map(str::to_string),
+            })
+        }
+        Err(ureq::Error::Status(code, response)) => Err(AdaptiveErr::from_status(
+            code,
+            response.into_string().unwrap_or_default(),
+        )),
+        Err(_) => Err(AdaptiveErr::Offline),
+    }
+}
+
+/// Relee el lazo en un hilo aparte y lo guarda en el estado compartido.
+fn refresh_adaptive(shared: &Arc<Mutex<Shared>>) {
+    let result = get_adaptive();
+    let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+    match result {
+        Ok(data) => {
+            guard.adaptive.data = Some(Arc::new(data));
+            guard.adaptive.error = None;
+        }
+        Err(err) => guard.adaptive.error = Some(err),
+    }
+}
+
+// ------------------------------------------------------------- telemetría ---
+
+/// Azul pátina para el segundo ventilador: mantiene la paleta de latón y
+/// cobre, pero separa las dos líneas de RPM.
+const PATINA: Color32 = Color32::from_rgb(122, 176, 196);
+
+#[derive(Clone, Copy)]
+struct Stats {
+    min: f64,
+    max: f64,
+    avg: f64,
+    last: Option<f64>,
+}
+
+fn stat_of(samples: &[TeleSample], pick: impl Fn(&TeleSample) -> Option<f64>) -> Option<Stats> {
+    let mut n = 0usize;
+    let mut sum = 0.0;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for sample in samples {
+        if let Some(value) = pick(sample).filter(|v| v.is_finite()) {
+            n += 1;
+            sum += value;
+            min = min.min(value);
+            max = max.max(value);
+        }
+    }
+    if n == 0 {
+        return None;
+    }
+    Some(Stats {
+        min,
+        max,
+        avg: sum / n as f64,
+        last: samples.iter().rev().find_map(|s| pick(s)),
+    })
+}
+
+/// Segundos con la serie por encima del límite. Un hueco mayor a 30 s no se
+/// cuenta como tiempo caliente: el muestreo normal es de segundos.
+fn seconds_over(
+    samples: &[TeleSample],
+    pick: impl Fn(&TeleSample) -> Option<f64>,
+    limit: f64,
+) -> f64 {
+    let mut total = 0.0;
+    for pair in samples.windows(2) {
+        let dt = (pair[1].ts - pair[0].ts).clamp(0.0, 30.0);
+        if let (Some(a), Some(b)) = (pick(&pair[0]), pick(&pair[1])) {
+            if (a + b) * 0.5 > limit {
+                total += dt;
+            }
+        }
+    }
+    total
+}
+
+/// Pendiente de la temperatura de CPU en °C por minuto (mínimos cuadrados).
+fn cpu_slope(samples: &[TeleSample]) -> Option<f64> {
+    let points: Vec<(f64, f64)> = samples
+        .iter()
+        .filter_map(|s| s.cpu.map(|cpu| (s.ts, cpu)))
+        .collect();
+    if points.len() < 6 {
+        return None;
+    }
+    let t0 = points[0].0;
+    let n = points.len() as f64;
+    let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+    for (ts, cpu) in &points {
+        let x = (ts - t0) / 60.0;
+        sx += x;
+        sy += cpu;
+        sxx += x * x;
+        sxy += x * cpu;
+    }
+    let den = n * sxx - sx * sx;
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    Some((n * sxy - sx * sy) / den)
+}
+
+fn avg_opt<T>(rows: &[T], pick: impl Fn(&T) -> Option<f64>) -> Option<f64> {
+    let mut n = 0.0;
+    let mut sum = 0.0;
+    for row in rows {
+        if let Some(value) = pick(row) {
+            n += 1.0;
+            sum += value;
+        }
+    }
+    (n > 0.0).then(|| sum / n)
+}
+
+struct FanInsight {
+    rpm_low: f64,
+    rpm_high: f64,
+    cpu_low: f64,
+    cpu_high: f64,
+    gpu_low: Option<f64>,
+    gpu_high: Option<f64>,
+}
+
+/// ¿Se nota el aire? Parte las muestras por RPM (mitad baja contra mitad
+/// alta) y compara la temperatura media: si con más RPM baja, el aire está
+/// haciendo su trabajo.
+fn fan_insight(samples: &[TeleSample]) -> Option<FanInsight> {
+    let mut rows: Vec<(f64, f64, Option<f64>)> = Vec::new();
+    for sample in samples {
+        let rpm = match (sample.fan1, sample.fan2) {
+            (Some(a), Some(b)) => a + b,
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => continue,
+        };
+        if let Some(cpu) = sample.cpu.filter(|v| v.is_finite()) {
+            rows.push((rpm, cpu, sample.gpu));
+        }
+    }
+    if rows.len() < 8 {
+        return None;
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = rows.len() / 2;
+    let (low, high) = rows.split_at(mid);
+    let rpm_low = low.iter().map(|r| r.0).sum::<f64>() / low.len().max(1) as f64;
+    let rpm_high = high.iter().map(|r| r.0).sum::<f64>() / high.len().max(1) as f64;
+    Some(FanInsight {
+        rpm_low,
+        rpm_high,
+        cpu_low: avg_opt(low, |r| Some(r.1))?,
+        cpu_high: avg_opt(high, |r| Some(r.1))?,
+        gpu_low: avg_opt(low, |r| r.2),
+        gpu_high: avg_opt(high, |r| r.2),
+    })
+}
+
+fn nice_bounds(min: f64, max: f64) -> (f64, f64) {
+    if !(min.is_finite() && max.is_finite()) {
+        return (0.0, 1.0);
+    }
+    if (max - min).abs() < 1e-6 {
+        let pad = max.abs().max(1.0) * 0.1;
+        return (min - pad, max + pad);
+    }
+    let pad = (max - min) * 0.12;
+    let (lo, hi) = (min - pad, max + pad);
+    let raw = (hi - lo) / 3.0;
+    let magnitude = 10f64.powf(raw.log10().floor());
+    let norm = raw / magnitude;
+    let step = if norm >= 5.0 {
+        5.0
+    } else if norm >= 2.0 {
+        2.0
+    } else {
+        1.0
+    } * magnitude;
+    ((lo / step).floor() * step, (hi / step).ceil() * step)
+}
+
+fn fmt_axis(value: f64) -> String {
+    if value.abs() >= 1000.0 {
+        format!("{:.1}k", value / 1000.0)
+    } else {
+        format!("{value:.0}")
+    }
+}
+
+fn fmt_v(value: Option<f64>, digits: usize, unit: &str) -> String {
+    match value {
+        Some(v) if v.is_finite() => {
+            if unit.is_empty() {
+                format!("{v:.digits$}")
+            } else {
+                format!("{v:.digits$} {unit}")
+            }
+        }
+        _ => "—".to_string(),
+    }
+}
+
+fn fmt_dur(seconds: f64) -> String {
+    let secs = seconds.max(0.0).round() as u64;
+    if secs < 60 {
+        format!("{secs} s")
+    } else {
+        format!("{} min {:02} s", secs / 60, secs % 60)
+    }
+}
+
+fn compact_secs(seconds: f64) -> String {
+    let secs = seconds.max(0.0).round() as u64;
+    if secs < 60 {
+        format!("{secs} s")
+    } else if secs < 3600 {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{} h {:02} min", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Bloque de estado con botón: mismo lenguaje que los avisos, pero adentro de
+/// una tarjeta y con acción propia (Reintentar / pedir de nuevo).
+fn tele_state(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: &str,
+    color: Color32,
+    action: &str,
+    enabled: bool,
+) -> bool {
+    let width = ui.available_width();
+    let mut clicked = false;
+    let frame = egui::Frame::new()
+        .fill(a(color, 14))
+        .stroke(mk_stroke(1.0, a(color, 90)))
+        .corner_radius(8.0)
+        .inner_margin(Margin::symmetric(11, 9))
+        .show(ui, |ui| {
+            let inner = (width - 22.0).max(80.0);
+            ui.set_width(inner);
+            ui.set_max_width(inner);
+            ui.horizontal(|ui| {
+                dot(ui, color, 3.5);
+                ui.label(RichText::new(title).size(11.5).strong().color(color));
+            });
+            ui.add_space(3.0);
+            ui.add(egui::Label::new(RichText::new(body).size(10.0).color(MUTED)).wrap());
+            ui.add_space(7.0);
+            if btn(ui, action, 104.0, 26.0, Btn::Secondary, enabled).clicked() && enabled {
+                clicked = true;
+            }
+        });
+    rivets(ui, frame.response.rect);
+    clicked
+}
+
+fn num_cell(ui: &mut egui::Ui, width: f32, text: &str, color: Color32, size: f32, strong: bool) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 18.0),
+        egui::Layout::right_to_left(Align::Center),
+        |ui| {
+            let mut rich = RichText::new(text).size(size).monospace().color(color);
+            if strong {
+                rich = rich.strong();
+            }
+            ui.add(egui::Label::new(rich).truncate());
+        },
+    );
+}
+
+fn telemetry_kv(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
+    let width = ui.available_width();
+    let value_width = (width * 0.62).clamp(110.0, 320.0);
+    let label_width = (width - value_width - 8.0).max(40.0);
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 19.0),
+        egui::Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.add_sized(
+                [label_width, 19.0],
+                egui::Label::new(RichText::new(label).size(10.5).color(MUTED)).truncate(),
+            );
+            ui.allocate_ui_with_layout(
+                Vec2::new(value_width, 19.0),
+                egui::Layout::right_to_left(Align::Center),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(value)
+                                .size(11.0)
+                                .monospace()
+                                .strong()
+                                .color(color),
+                        )
+                        .truncate(),
+                    );
+                },
+            );
+        },
+    );
+}
+
+/// Tabla compacta de la ventana: actual / mínimo / promedio / máximo.
+fn stat_table(ui: &mut egui::Ui, rows: &[(&str, Color32, Option<Stats>, usize)]) {
+    let width = ui.available_width().max(200.0);
+    let gap = 6.0;
+    let cell = ((width - 90.0) / 4.0 - gap).clamp(38.0, 74.0);
+    let label_width = (width - 4.0 * cell - 4.0 * gap).max(52.0);
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 16.0),
+        egui::Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.add_sized(
+                [label_width, 16.0],
+                egui::Label::new(RichText::new("SERIE").size(8.5).strong().color(FAINT)).truncate(),
+            );
+            for title in ["ACTUAL", "MÍN", "PROM", "MÁX"] {
+                num_cell(ui, cell, title, FAINT, 8.5, false);
+            }
+        },
+    );
+    ui.add_space(3.0);
+    for (label, color, stats, digits) in rows {
+        let (last, min, avg, max) = match stats {
+            Some(s) => (s.last, Some(s.min), Some(s.avg), Some(s.max)),
+            None => (None, None, None, None),
+        };
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, 18.0),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.add_sized(
+                    [label_width, 18.0],
+                    egui::Label::new(RichText::new(*label).size(10.5).color(MUTED)).truncate(),
+                );
+                num_cell(ui, cell, &fmt_v(last, *digits, ""), *color, 10.5, true);
+                num_cell(ui, cell, &fmt_v(min, *digits, ""), MUTED, 10.5, false);
+                num_cell(ui, cell, &fmt_v(avg, *digits, ""), TEXT, 10.5, true);
+                num_cell(ui, cell, &fmt_v(max, *digits, ""), *color, 10.5, false);
+            },
+        );
+    }
+}
+
+/// Gráfico de líneas dibujado a mano con el painter: grilla, límite, leyenda
+/// con el último valor y cruz de lectura. Sin dependencias nuevas.
+fn tele_chart(
+    ui: &mut egui::Ui,
+    height: f32,
+    xs: &[f32],
+    series: &[(&str, Color32, &[Option<f64>])],
+    unit: &str,
+    limit: Option<f64>,
+    left_label: &str,
+    hover: &mut Option<usize>,
+) {
+    let width = ui.available_width().max(180.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 8.0, SUNKEN);
+    painter.rect_stroke(rect, 8.0, mk_stroke(1.0, BORDER_SOFT), StrokeKind::Inside);
+    let plot = Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0, rect.top() + 18.0),
+        Pos2::new(
+            (rect.right() - 38.0).max(rect.left() + 80.0),
+            rect.bottom() - 15.0,
+        ),
+    );
+    if plot.width() < 40.0 || plot.height() < 24.0 {
+        return;
+    }
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for (_, _, values) in series.iter() {
+        for value in values.iter().flatten() {
+            if value.is_finite() {
+                lo = lo.min(*value);
+                hi = hi.max(*value);
+            }
+        }
+    }
+    let (lo, hi) = if lo.is_finite() && hi.is_finite() {
+        nice_bounds(lo, hi)
+    } else {
+        (0.0, 1.0)
+    };
+    let span = (hi - lo).max(1e-6);
+    let y_of =
+        |value: f64| plot.bottom() - (((value - lo) / span).clamp(0.0, 1.0) as f32) * plot.height();
+
+    for band in 0..=3 {
+        let frac = band as f32 / 3.0;
+        let y = plot.bottom() - plot.height() * frac;
+        painter.hline(
+            plot.x_range(),
+            y,
+            mk_stroke(1.0, a(BORDER, if band == 0 { 110 } else { 55 })),
+        );
+        painter.text(
+            Pos2::new(plot.right() + 4.0, y),
+            Align2::LEFT_CENTER,
+            fmt_axis(lo + span * frac as f64),
+            FontId::monospace(8.0),
+            FAINT,
+        );
+    }
+    if let Some(limit) = limit {
+        if limit > lo && limit < hi {
+            let y = y_of(limit);
+            painter.hline(plot.x_range(), y, mk_stroke(1.0, a(DANGER, 110)));
+            painter.text(
+                Pos2::new(plot.right() - 2.0, y - 2.0),
+                Align2::RIGHT_BOTTOM,
+                format!("{limit:.0}"),
+                FontId::monospace(8.0),
+                a(DANGER, 190),
+            );
+        }
+    }
+    painter.text(
+        Pos2::new(rect.right() - 6.0, rect.top() + 8.0),
+        Align2::RIGHT_CENTER,
+        unit,
+        FontId::monospace(8.5),
+        FAINT,
+    );
+
+    // Leyenda con el último valor de cada serie.
+    let font = FontId::proportional(9.0);
+    let mut lx = plot.left() + 2.0;
+    for (label, color, values) in series.iter() {
+        if lx + 16.0 > plot.right() {
+            break;
+        }
+        painter.hline(lx..=(lx + 9.0), rect.top() + 8.0, mk_stroke(2.0, *color));
+        lx += 12.0;
+        let last = values.iter().rev().flatten().next().copied();
+        let text = match last {
+            Some(v) if unit == "rpm" => format!("{label} {v:.0}"),
+            Some(v) => format!("{label} {v:.1}{unit}"),
+            None => (*label).to_string(),
+        };
+        painter.text(
+            Pos2::new(lx, rect.top() + 8.0),
+            Align2::LEFT_CENTER,
+            &text,
+            font.clone(),
+            *color,
+        );
+        lx += text_width(ui, &text, font.clone()) + 12.0;
+    }
+
+    // Series: se corta la línea cuando falta el dato.
+    for (_, color, values) in series.iter() {
+        let mut segment: Vec<Pos2> = Vec::new();
+        for (i, value) in values.iter().enumerate() {
+            match value.filter(|v| v.is_finite()) {
+                Some(v) => {
+                    let x = plot.left()
+                        + plot.width() * xs.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                    segment.push(Pos2::new(x, y_of(v)));
+                }
+                None => {
+                    if segment.len() >= 2 {
+                        painter.add(egui::Shape::line(
+                            std::mem::take(&mut segment),
+                            mk_stroke(1.4, *color),
+                        ));
+                    } else {
+                        segment.clear();
+                    }
+                }
+            }
+        }
+        if segment.len() >= 2 {
+            painter.add(egui::Shape::line(segment, mk_stroke(1.4, *color)));
+        }
+    }
+
+    painter.text(
+        Pos2::new(plot.left() + 1.0, rect.bottom() - 2.0),
+        Align2::LEFT_BOTTOM,
+        left_label,
+        FontId::proportional(8.5),
+        FAINT,
+    );
+    painter.text(
+        Pos2::new(plot.right(), rect.bottom() - 2.0),
+        Align2::RIGHT_BOTTOM,
+        "ahora",
+        FontId::proportional(8.5),
+        FAINT,
+    );
+
+    if let Some(pos) = response.hover_pos() {
+        if plot.contains(pos) && !xs.is_empty() {
+            let frac = ((pos.x - plot.left()) / plot.width().max(1.0)).clamp(0.0, 1.0);
+            let mut best = 0usize;
+            let mut best_d = f32::INFINITY;
+            for (i, x) in xs.iter().enumerate() {
+                let d = (*x - frac).abs();
+                if d < best_d {
+                    best_d = d;
+                    best = i;
+                }
+            }
+            *hover = Some(best);
+            let x = plot.left() + plot.width() * xs.get(best).copied().unwrap_or(0.0);
+            painter.vline(x, plot.y_range(), mk_stroke(1.0, a(BRASS, 110)));
+            for (_, color, values) in series.iter() {
+                if let Some(Some(v)) = values.get(best) {
+                    if v.is_finite() {
+                        painter.circle_filled(Pos2::new(x, y_of(*v)), 2.6, *color);
+                    }
+                }
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+    }
+}
+
+fn tele_tile(
+    ui: &mut egui::Ui,
+    width: f32,
+    label: &str,
+    stats: Option<Stats>,
+    scale: f64,
+    digits: usize,
+    unit: &str,
+    color: Color32,
+) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width.max(50.0), 60.0), Sense::hover());
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 8.0, SUNKEN);
+    painter.rect_stroke(rect, 8.0, mk_stroke(1.0, BORDER_SOFT), StrokeKind::Inside);
+    painter.text(
+        Pos2::new(rect.left() + 9.0, rect.top() + 6.0),
+        Align2::LEFT_TOP,
+        label,
+        FontId::proportional(9.0),
+        FAINT,
+    );
+    let value = stats.and_then(|s| s.last);
+    let (text, ink) = match value {
+        Some(v) if v.is_finite() => (fmt_v(Some(v), digits, unit), color),
+        _ => ("—".to_string(), FAINT),
+    };
+    painter.text(
+        Pos2::new(rect.left() + 9.0, rect.top() + 18.0),
+        Align2::LEFT_TOP,
+        &text,
+        FontId::monospace(15.0),
+        ink,
+    );
+    if let Some(s) = stats {
+        painter.text(
+            Pos2::new(rect.left() + 9.0, rect.top() + 38.0),
+            Align2::LEFT_TOP,
+            format!("{:.digits$} / {:.digits$}", s.min, s.max),
+            FontId::monospace(8.5),
+            FAINT,
+        );
+    }
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 9.0, rect.bottom() - 9.0),
+        Pos2::new(rect.right() - 9.0, rect.bottom() - 6.0),
+    );
+    painter.rect_filled(track, 1.5, a(BORDER, 90));
+    let frac = (value.unwrap_or(0.0) / scale.max(1e-6)).clamp(0.0, 1.0) as f32;
+    if frac > 0.0 {
+        painter.rect_filled(
+            Rect::from_min_size(track.min, Vec2::new(track.width() * frac, track.height())),
+            1.5,
+            a(ink, 200),
+        );
+    }
+}
+
+fn legion_telemetry_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    tele: &Telemetry,
+    lstate: &mut LegionUi,
+    intents: &mut LegionIntent,
+) {
+    card(ui, width, |ui| {
+        let refreshed = match tele.fetched {
+            Some(at) => format!("hace {}", compact_secs(at.elapsed().as_secs_f64())),
+            None => "sin lecturas".to_string(),
+        };
+        section(ui, "Telemetría", Some(refreshed.as_str()));
+
+        let ranges: [u32; 3] = [10, 30, 60];
+        let items: [(&str, bool); 3] = [
+            ("10 min", lstate.tele_range == 10),
+            ("30 min", lstate.tele_range == 30),
+            ("60 min", lstate.tele_range == 60),
+        ];
+        if let Some(idx) = option_grid(ui, &items, 70.0, 26.0, true) {
+            lstate.tele_range = ranges[idx];
+        }
+        ui.add_space(7.0);
+        ui.horizontal(|ui| {
+            if btn(ui, "Actualizar", 92.0, 26.0, Btn::Secondary, !tele.loading)
+                .on_hover_text("GET /api/legion/history?minutes=N ahora mismo")
+                .clicked()
+            {
+                intents.tele_fetch = true;
+            }
+            ui.add_space(4.0);
+            if btn(ui, "Exportar CSV", 108.0, 26.0, Btn::Secondary, true)
+                .on_hover_text(
+                    "Pide /api/legion/export.csv; si el motor no lo publica, guarda las muestras en memoria",
+                )
+                .clicked()
+            {
+                intents.tele_export = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if switch(ui, Id::new("legion-tele-live"), lstate.tele_auto).clicked() {
+                    lstate.tele_auto = !lstate.tele_auto;
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(if lstate.tele_auto { "En vivo" } else { "Manual" })
+                        .size(10.0)
+                        .color(if lstate.tele_auto { MUTED } else { FAINT }),
+                );
+            });
+        });
+        ui.add_space(9.0);
+
+        if let Some(err) = &tele.error {
+            if tele_state(
+                ui,
+                err.title(),
+                &err.body(),
+                err.color(),
+                "Reintentar",
+                !tele.loading,
+            ) {
+                intents.tele_fetch = true;
+            }
+            ui.add_space(8.0);
+        }
+
+        let Some(data) = tele.data.as_ref() else {
+            if tele.error.is_none() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(if tele.loading {
+                            "Leyendo el histórico del motor…"
+                        } else {
+                            "Todavía no hay histórico en memoria: pedilo con Actualizar."
+                        })
+                        .size(10.5)
+                        .color(FAINT),
+                    )
+                    .wrap(),
+                );
+            }
+            return;
+        };
+        if data.samples.is_empty() {
+            if tele_state(
+                ui,
+                "Histórico vacío",
+                "El motor responde pero no hay muestras en esta ventana: el buffer arranca con la primera lectura. Dejá la pestaña abierta unos segundos y reintentá.",
+                WARN,
+                "Reintentar",
+                !tele.loading,
+            ) {
+                intents.tele_fetch = true;
+            }
+            return;
+        }
+
+        let samples = &data.samples;
+        let t0 = samples.first().map(|s| s.ts).unwrap_or(0.0);
+        let t1 = samples.last().map(|s| s.ts).unwrap_or(t0);
+        let span = (t1 - t0).max(1.0);
+        let xs: Vec<f32> = samples
+            .iter()
+            .map(|s| (((s.ts - t0) / span) as f32).clamp(0.0, 1.0))
+            .collect();
+        let cpu: Vec<Option<f64>> = samples.iter().map(|s| s.cpu).collect();
+        let gpu: Vec<Option<f64>> = samples.iter().map(|s| s.gpu).collect();
+        let fan1: Vec<Option<f64>> = samples.iter().map(|s| s.fan1).collect();
+        let fan2: Vec<Option<f64>> = samples.iter().map(|s| s.fan2).collect();
+        let cpu_stats = stat_of(samples, |s| s.cpu);
+        let gpu_stats = stat_of(samples, |s| s.gpu);
+        let fan1_stats = stat_of(samples, |s| s.fan1);
+        let fan2_stats = stat_of(samples, |s| s.fan2);
+
+        // Valores actuales.
+        let rpm_scale = fan1
+            .iter()
+            .chain(fan2.iter())
+            .filter_map(|v| *v)
+            .fold(3600.0_f64, f64::max);
+        let inner = ui.available_width();
+        let gap = 7.0;
+        let cell = ((inner - gap * 3.0) / 4.0).floor().max(64.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            tele_tile(ui, cell, "CPU", cpu_stats, 100.0, 1, "°C", BRASS);
+            tele_tile(ui, cell, "GPU", gpu_stats, 100.0, 1, "°C", COPPER_HI);
+            tele_tile(ui, cell, "FAN 1", fan1_stats, rpm_scale, 0, "rpm", PATINA);
+            tele_tile(ui, cell, "FAN 2", fan2_stats, rpm_scale, 0, "rpm", OK);
+        });
+
+        // Gráficos.
+        let range_label = format!("-{} min", data.minutes);
+        let mut hover: Option<usize> = None;
+        ui.add_space(11.0);
+        eyebrow(ui, "Temperaturas");
+        ui.add_space(4.0);
+        tele_chart(
+            ui,
+            136.0,
+            &xs,
+            &[("CPU", BRASS, &cpu), ("GPU", COPPER_HI, &gpu)],
+            "°C",
+            Some(90.0),
+            &range_label,
+            &mut hover,
+        );
+        ui.add_space(9.0);
+        eyebrow(ui, "Ventiladores");
+        ui.add_space(4.0);
+        tele_chart(
+            ui,
+            112.0,
+            &xs,
+            &[("Fan 1", PATINA, &fan1), ("Fan 2", OK, &fan2)],
+            "rpm",
+            None,
+            &range_label,
+            &mut hover,
+        );
+        if let Some(sample) = hover.and_then(|i| samples.get(i)) {
+            ui.add_space(5.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "hace {} · CPU {} · GPU {} · F1 {} · F2 {}{}",
+                        compact_secs((t1 - sample.ts).max(0.0)),
+                        fmt_v(sample.cpu, 1, "°C"),
+                        fmt_v(sample.gpu, 1, "°C"),
+                        fmt_v(sample.fan1, 0, "rpm"),
+                        fmt_v(sample.fan2, 0, "rpm"),
+                        match sample.mode.as_deref() {
+                            Some(mode) if !mode.is_empty() => format!(" · {}", pretty(mode)),
+                            _ => String::new(),
+                        }
+                    ))
+                    .size(9.5)
+                    .monospace()
+                    .color(MUTED),
+                )
+                .wrap(),
+            );
+        }
+
+        // Resumen de la ventana.
+        ui.add_space(11.0);
+        eyebrow(ui, "Resumen de la ventana");
+        ui.add_space(4.0);
+        stat_table(
+            ui,
+            &[
+                ("CPU °C", BRASS, cpu_stats, 1),
+                ("GPU °C", COPPER_HI, gpu_stats, 1),
+                ("Fan 1 rpm", PATINA, fan1_stats, 0),
+                ("Fan 2 rpm", OK, fan2_stats, 0),
+                ("GPU W", MUTED, stat_of(samples, |s| s.gpu_w), 1),
+                ("GPU MHz", MUTED, stat_of(samples, |s| s.gpu_mhz), 0),
+            ],
+        );
+
+        // Tiempo sobre 90 °C.
+        let cpu_over = seconds_over(samples, |s| s.cpu, 90.0);
+        let gpu_over = seconds_over(samples, |s| s.gpu, 90.0);
+        let pct = |secs: f64| if span > 0.0 { secs / span * 100.0 } else { 0.0 };
+        ui.add_space(10.0);
+        eyebrow(ui, "Tiempo sobre 90 °C");
+        ui.add_space(4.0);
+        telemetry_kv(
+            ui,
+            "CPU",
+            &format!("{} · {:.0} %", fmt_dur(cpu_over), pct(cpu_over)),
+            if cpu_over > 0.0 { DANGER } else { OK },
+        );
+        telemetry_kv(
+            ui,
+            "GPU",
+            &format!("{} · {:.0} %", fmt_dur(gpu_over), pct(gpu_over)),
+            if gpu_over > 0.0 { DANGER } else { OK },
+        );
+
+        // Análisis: RPM contra temperatura y tendencia.
+        ui.add_space(10.0);
+        eyebrow(ui, "Análisis de la ventana");
+        ui.add_space(4.0);
+        if let Some(insight) = fan_insight(samples) {
+            telemetry_kv(
+                ui,
+                "RPM bajo / alto",
+                &format!("{:.0} / {:.0}", insight.rpm_low, insight.rpm_high),
+                MUTED,
+            );
+            telemetry_kv(
+                ui,
+                "CPU con RPM bajo / alto",
+                &format!("{:.1} / {:.1} °C", insight.cpu_low, insight.cpu_high),
+                MUTED,
+            );
+            if let (Some(lo), Some(hi)) = (insight.gpu_low, insight.gpu_high) {
+                telemetry_kv(
+                    ui,
+                    "GPU con RPM bajo / alto",
+                    &format!("{lo:.1} / {hi:.1} °C"),
+                    MUTED,
+                );
+            }
+            ui.add_space(5.0);
+            let delta = insight.cpu_high - insight.cpu_low;
+            let (text, color) = if delta <= -1.5 {
+                (
+                    format!(
+                        "Los ventiladores están haciendo su trabajo: con las RPM altas el CPU queda {:.1} °C más frío.",
+                        -delta
+                    ),
+                    OK,
+                )
+            } else if delta >= 1.5 {
+                (
+                    format!(
+                        "Con las RPM altas el CPU queda {:.1} °C más caliente: el aire no alcanza. Revisá la curva, el modo térmico o la entrada de aire.",
+                        delta
+                    ),
+                    COPPER_HI,
+                )
+            } else {
+                (
+                    "Sin diferencia clara entre RPM bajas y altas en esta ventana: hace falta más carga o más tiempo para separar las dos mitades."
+                        .to_string(),
+                    WARN,
+                )
+            };
+            ui.add(egui::Label::new(RichText::new(text).size(10.0).color(color)).wrap());
+            ui.add_space(4.0);
+        } else {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Hacen falta al menos ocho muestras con RPM y temperatura para comparar ventiladores contra temperatura.",
+                    )
+                    .size(10.0)
+                    .color(FAINT),
+                )
+                .wrap(),
+            );
+            ui.add_space(4.0);
+        }
+        if let Some(slope) = cpu_slope(samples) {
+            let (word, color) = if slope >= 0.15 {
+                ("subiendo", COPPER_HI)
+            } else if slope <= -0.15 {
+                ("bajando", OK)
+            } else {
+                ("estable", MUTED)
+            };
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "Tendencia del CPU: {slope:+.2} °C/min en la ventana ({word})."
+                    ))
+                    .size(10.0)
+                    .color(color),
+                )
+                .wrap(),
+            );
+        }
+
+        // Cierre de sesión: qué se guardó y con qué ritmo.
+        ui.add_space(10.0);
+        eyebrow(ui, "Sesión");
+        ui.add_space(4.0);
+        let period = if samples.len() > 1 {
+            span / (samples.len() - 1) as f64
+        } else {
+            0.0
+        };
+        telemetry_kv(
+            ui,
+            "Muestras",
+            &format!("{} · cada {:.0} s", samples.len(), period.max(0.0)),
+            MUTED,
+        );
+        telemetry_kv(
+            ui,
+            "Cobertura",
+            &format!("{} de {} min", fmt_dur(span), data.minutes),
+            MUTED,
+        );
+        if let Some(mode) = samples.iter().rev().find_map(|s| s.mode.as_deref()) {
+            telemetry_kv(ui, "Modo (última muestra)", &pretty(mode), BRASS);
+        }
+    });
+}
+
+fn adaptive_state_style(state: &str) -> (&'static str, Color32) {
+    let state = state.trim().to_ascii_lowercase();
+    if state.starts_with("crit") {
+        ("Crítico", DANGER)
+    } else if state.starts_with("hot") || state.starts_with("warm") || state.starts_with("cal") {
+        ("Caliente", WARN)
+    } else if state.is_empty() {
+        ("—", FAINT)
+    } else {
+        ("Normal", OK)
+    }
+}
+
+fn temp_limit_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut i64,
+    min: i64,
+    max: i64,
+    enabled: bool,
+) -> bool {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 20.0),
+        egui::Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.add_sized(
+                [(width - 96.0).max(40.0), 20.0],
+                egui::Label::new(RichText::new(label).size(10.5).color(MUTED)).truncate(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!("{value} °C"))
+                        .size(13.0)
+                        .monospace()
+                        .strong()
+                        .color(if enabled { BRASS } else { FAINT }),
+                );
+            });
+        },
+    );
+    ui.add_space(3.0);
+    brass_slider(ui, value, min, max, 1, width, enabled).changed()
+}
+
+fn legion_adaptive_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    adaptive: &Adaptive,
+    lstate: &mut LegionUi,
+    intents: &mut LegionIntent,
+) {
+    card(ui, width, |ui| {
+        let data = adaptive.data.as_deref();
+        let pending = adaptive
+            .error
+            .as_ref()
+            .map(|e| e.pending())
+            .unwrap_or(false);
+        let live = data.is_some() && !pending;
+        let (state_text, state_color) = match data {
+            Some(data) if !pending => adaptive_state_style(&data.state),
+            _ => ("—", FAINT),
+        };
+        section(ui, "AUTO / Inteligente", Some(state_text));
+
+        if let Some(err) = &adaptive.error {
+            if tele_state(
+                ui,
+                err.title(),
+                &err.body(),
+                err.color(),
+                "Reintentar",
+                true,
+            ) {
+                intents.adaptive_fetch = true;
+            }
+            ui.add_space(8.0);
+        }
+
+        let inner = ui.available_width();
+        ui.allocate_ui_with_layout(
+            Vec2::new(inner, 28.0),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                if switch(ui, Id::new("legion-adaptive"), lstate.ad_enabled).clicked() && live {
+                    lstate.ad_enabled = !lstate.ad_enabled;
+                    lstate.ad_edited = false;
+                    intents.adaptive = Some(json!({ "enabled": lstate.ad_enabled }));
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(if lstate.ad_enabled {
+                        "Domador decide solo"
+                    } else {
+                        "AUTO apagado"
+                    })
+                    .size(12.0)
+                    .strong()
+                    .color(if lstate.ad_enabled { BRASS } else { MUTED }),
+                );
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    badge(
+                        ui,
+                        &state_text.to_uppercase(),
+                        state_color,
+                        a(state_color, 22),
+                    );
+                });
+            },
+        );
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "El motor mira la temperatura del EC y sube escalones solo: objetivo → caliente → crítico, con histéresis para no oscilar. La UI sólo muestra el estado y manda los límites; la decisión es del backend.",
+                )
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+        ui.add_space(9.0);
+
+        eyebrow(ui, "Escalones");
+        ui.add_space(2.0);
+        if temp_limit_row(ui, "Objetivo", &mut lstate.ad_target, 60, 100, live) {
+            lstate.ad_edited = true;
+        }
+        if temp_limit_row(ui, "Caliente", &mut lstate.ad_hot, 65, 105, live) {
+            lstate.ad_edited = true;
+        }
+        if temp_limit_row(ui, "Crítico", &mut lstate.ad_critical, 70, 110, live) {
+            lstate.ad_edited = true;
+        }
+        if !(lstate.ad_target < lstate.ad_hot && lstate.ad_hot <= lstate.ad_critical) {
+            ui.add_space(2.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Los escalones tienen que subir: objetivo < caliente ≤ crítico. Así se aplican.",
+                    )
+                    .size(9.5)
+                    .color(WARN),
+                )
+                .wrap(),
+            );
+        }
+        ui.add_space(7.0);
+        let ordered = lstate.ad_target < lstate.ad_hot && lstate.ad_hot <= lstate.ad_critical;
+        if btn(
+            ui,
+            "Aplicar límites",
+            124.0,
+            28.0,
+            Btn::Primary,
+            live && lstate.ad_edited && ordered,
+        )
+        .on_hover_text("POST /api/legion/adaptive con target_c, hot_c y critical_c")
+        .clicked()
+        {
+            intents.adaptive = Some(json!({
+                "target_c": lstate.ad_target,
+                "hot_c": lstate.ad_hot,
+                "critical_c": lstate.ad_critical,
+            }));
+            lstate.ad_edited = false;
+        }
+
+        ui.add_space(9.0);
+        eyebrow(ui, "Histéresis");
+        ui.add_space(3.0);
+        telemetry_kv(
+            ui,
+            "Dwell (sostener)",
+            &match data.and_then(|d| d.dwell_s) {
+                Some(v) => format!("{v:.0} s"),
+                None => "— sin dato".to_string(),
+            },
+            MUTED,
+        );
+        telemetry_kv(
+            ui,
+            "Cooldown (bajar)",
+            &match data.and_then(|d| d.cooldown_s) {
+                Some(v) => format!("{v:.0} s"),
+                None => "— sin dato".to_string(),
+            },
+            MUTED,
+        );
+        ui.add_space(8.0);
+        eyebrow(ui, "Última acción");
+        ui.add_space(3.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    data.and_then(|d| d.last_action.clone())
+                        .filter(|text| !text.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            if live {
+                                "Sin acciones todavía: el lazo espera que la temperatura cruce un escalón.".to_string()
+                            } else {
+                                "—".to_string()
+                            }
+                        }),
+                )
+                .size(10.5)
+                .color(MUTED),
+            )
+            .wrap(),
+        );
+    });
+}
+
+fn legion_preview(ui: &mut egui::Ui, width: f32) {
+    card(ui, width, |ui| {
+        section(ui, "Panel en espera", Some("/api/legion"));
+        ui.label(
+            RichText::new("La pestaña ya está armada y se llena sola cuando el motor publique el panel del EC:")
+                .size(11.0)
+                .color(MUTED),
+        );
+        ui.add_space(8.0);
+        for (title, body) in [
+            (
+                "Equipo y térmicas",
+                "Modelo, BIOS y temperatura de CPU/GPU leídos por el EC.",
+            ),
+            (
+                "Ventiladores y modo térmico",
+                "RPM de cada ventilador contra su máximo, y selector Silencioso / Equilibrado / Rendimiento / Custom.",
+            ),
+            (
+                "Límites y curva",
+                "PL1/PL2 con presets de 35, 45 y 65 W, más la curva de diez puntos (niveles 1 a 10) con full blast y restaurar stock.",
+            ),
+            (
+                "Modo Jefe",
+                "Cierra Vantage, Legion Arena, LLT, LFC, UXTU y Ryzen Controller para que no peleen por el EC.",
+            ),
+        ] {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(3.0, 10.0), Sense::hover());
+                ui.painter().rect_filled(rect, 1.5, BRASS_DIM);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(title).size(11.0).strong().color(TEXT));
+                    ui.add(
+                        egui::Label::new(RichText::new(body).size(10.0).color(MUTED)).wrap(),
+                    );
+                });
+            });
+            ui.add_space(6.0);
+        }
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Mientras tanto Procesos, Salud y Ajustes funcionan igual: esta pestaña sólo agrega lecturas.",
+                )
+                .size(9.5)
+                .color(FAINT),
+            )
+            .wrap(),
+        );
+    });
 }
 
 fn icon() -> Option<Arc<egui::IconData>> {
