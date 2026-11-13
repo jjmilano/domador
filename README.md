@@ -4,7 +4,7 @@ Control de procesos y rendimiento para Windows, escrito en Rust. Una alternativa
 
 Un motor nativo. UI nativa. Sin navegador, sin WebView, sin dependencias en tiempo de ejecución. Sin llamadas a casa.
 
-**Descargar:** [Domador v0.6.0](https://github.com/jjmilano/domador/releases/tag/v0.6.0) · Windows 10/11 x64.
+**Descargar:** [Domador v0.6.1](https://github.com/jjmilano/domador/releases/tag/v0.6.1) · Windows 10/11 x64.
 
 ![UI de Domador](docs/screenshot.png)
 
@@ -116,7 +116,7 @@ El binario queda en `target/release/domador.exe`. Copialo donde quieras y agreg�
 ## Uso
 
 ```bash
-domador              # arranca el motor y abre la UI en el navegador
+domador              # arranca el motor y abre la UI nativa
 domador serve        # sólo el servidor (UI + API), sin abrir nada
 domador serve --port 9000
 domador mcp          # servidor MCP por stdio (lo lanza el cliente, no vos)

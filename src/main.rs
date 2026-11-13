@@ -96,6 +96,15 @@ fn run_server(port: u16, open: bool) -> Result<(), String> {
 }
 
 fn open_ui(url: &str) {
+    // Preferir la UI nativa; el navegador queda como fallback de desarrollo.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let ui = dir.join("domador-ui.exe");
+            if ui.exists() && Command::new(ui).spawn().is_ok() {
+                return;
+            }
+        }
+    }
     let candidates = [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
