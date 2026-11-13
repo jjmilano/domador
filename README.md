@@ -202,6 +202,8 @@ Medición real en esta notebook (Legion, 16 hilos lógicos, Windows 11), misma s
 | Distribución | instalador + servicio | un `.exe` de 2,06 MB |
 | Churn real (30 min de su log) | 35 bajadas sobre 5 procesos, incluidos Chrome, WebView y ChatGPT | — |
 
+> Benchmark medido con v0.4.2. El motor de v0.5.0 conserva el mismo sampler; la pestaña Salud sólo consulta GPU/memoria cuando la UI está abierta.
+
 **Lectura honesta:** Lasso gana en reacción inicial; Domador gana en huella (17,3 MB y 0,12% contra 20 MB y 0,19%), en estabilidad (la mitad de cambios de prioridad), en tamaño de distribución, en automatización (API/MCP) y en no necesitar servicio. La UI de Domador es una pestaña del Edge que ya está abierto, así que su costo no es comparable con una GUI nativa; el motor es el número que importa cuando jugás.
 
 La vía rápida de ProBalance, medida aparte con un hog de 4 hilos (25% de la máquina), baja la prioridad en **1,8 s** sin esperar los 9 s. Los picos moderados siguen la vía lenta para no flapear.

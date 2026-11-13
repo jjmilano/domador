@@ -9,7 +9,7 @@ Este directorio tiene todo lo necesario para reproducir la comparación. Los nú
 - NVIDIA GeForce RTX 3070 Laptop GPU
 - Windows 11 Home Insider Preview 10.0.26220
 - Process Lasso 18.4.0.48, configuración vigente de la máquina
-- Domador 0.5.0 (release, un `.exe`)
+- Domador 0.4.2 (misma base de motor que 0.5.0)
 
 ## Carga
 
