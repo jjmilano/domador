@@ -745,6 +745,54 @@ impl Engine {
         (freed, count)
     }
 
+    pub fn trim_background(&mut self) -> (u64, u32) {
+        let fg = self.system.foreground;
+        let visible = win::visible_window_pids();
+        let own = std::process::id();
+        let min = 192 * MB;
+        let mut targets: Vec<(u32, u64)> = self
+            .rows
+            .iter()
+            .filter(|r| r.pid != own && !r.protected)
+            .filter(|r| r.cpu < 0.5)
+            .filter(|r| r.rss >= min)
+            .filter(|r| Some(r.pid) != fg && !visible.contains(&r.pid))
+            .filter(|r| {
+                !matches!(
+                    r.name.to_ascii_lowercase().as_str(),
+                    "explorer.exe"
+                        | "dwm.exe"
+                        | "audiodg.exe"
+                        | "memory compression"
+                        | "msmpeng.exe"
+                )
+            })
+            .map(|r| (r.pid, r.rss))
+            .collect();
+        targets.sort_by(|a, b| b.1.cmp(&a.1));
+        targets.truncate(10);
+
+        let mut freed = 0u64;
+        let mut count = 0u32;
+        for (pid, _) in targets {
+            if let Ok(bytes) = self.trim(pid) {
+                if bytes > 0 {
+                    freed += bytes;
+                    count += 1;
+                }
+            }
+        }
+        let _ = self.sampler.refresh();
+        self.log(
+            "info",
+            format!(
+                "Alivio de memoria: {} liberados en {count} proceso(s) de fondo",
+                fmt_mb(freed)
+            ),
+        );
+        (freed, count)
+    }
+
     pub fn restore(&mut self, pid: u32) -> Result<(), String> {
         let key = self.key_for_pid(pid);
         let original = self.applied.remove(&key);

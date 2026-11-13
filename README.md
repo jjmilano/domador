@@ -2,9 +2,9 @@
 
 Control de procesos y rendimiento para Windows, escrito en Rust. Una alternativa open source a Process Lasso, enfocada en una sola cosa: que la notebook rinda al mango cuando la necesitás — jugando o corriendo herramientas de IA — sin telemetría, sin cuentas y sin instalar medio sistema.
 
-Un solo `.exe`. Sin dependencias en tiempo de ejecución. Sin llamadas a casa.
+Un motor nativo. UI nativa. Sin navegador, sin WebView, sin dependencias en tiempo de ejecución. Sin llamadas a casa.
 
-**Descargar:** [Domador v0.5.0](https://github.com/jjmilano/domador/releases/tag/v0.5.0) · Windows 10/11 x64.
+**Descargar:** [Domador v0.6.0](https://github.com/jjmilano/domador/releases/tag/v0.6.0) · Windows 10/11 x64.
 
 ![UI de Domador](docs/screenshot.png)
 
@@ -16,9 +16,11 @@ Domador hace lo mismo (y algunas cosas más) con el código a la vista: reglas p
 
 ## Estado
 
-v0.5, usable y probado en Windows 11. El motor Rust, la UI web, el servidor de bandeja, la API HTTP y el servidor MCP están conectados. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP, snapshot NT y parsing de `powercfg` (6/6). El binario release pesa **2,1 MB**, no necesita runtime ni servicio, y el plan de energía se restaura al salir.
+v0.6, usable y probado en Windows 11. El motor Rust, la **UI nativa egui/wgpu**, la bandeja, la API HTTP y el servidor MCP están conectados. La UI ya no abre Edge ni WebView: es una ventana propia, con el mismo motor y el icono del león. `cargo test` cubre prioridad, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación de la API, handshake MCP, snapshot NT y parsing de `powercfg` (6/6). El plan de energía se restaura al salir.
 
-Lo que falta está en el roadmap: servicio elevado para procesos protegidos y CPU sets. Nada de eso impide usarlo hoy.
+La app son tres binarios chicos: `domador.exe` (motor), `domador-ui.exe` (ventana nativa) y `domador-tray.exe` (bandeja). La UI se puede cerrar sin apagar el motor.
+
+Lo que falta está en el roadmap: tarea programada elevada para arrancar siempre como admin sin UAC y CPU sets. Nada de eso impide usarlo hoy.
 
 ## Características
 
@@ -78,12 +80,13 @@ Perfiles listos para usar, cada uno con su combinación de plan de energía, Pro
 | **IA** | Modelos locales: hilos y memoria para el runtime, EcoQoS para el resto |
 | **Equilibrado** | Uso normal, ProBalance suave, plan del sistema |
 
-### API HTTP local, servidor MCP y UI web
+### API HTTP local, servidor MCP y UI nativa
 
-- `domador serve` levanta un servidor HTTP en `127.0.0.1` (puerto 8787 por defecto, `--port` para cambiarlo) que sirve la UI web y la API JSON.
+- `domador serve` levanta un servidor HTTP en `127.0.0.1` (puerto 8787 por defecto, `--port` para cambiarlo) que sirve la API JSON y la UI web de respaldo.
 - `domador mcp` expone las mismas operaciones como servidor MCP por stdio, así un agente (Claude, Codex, Hermes) puede leer el estado, aplicar reglas y cambiar de perfil con herramientas normales. Es un proxy: **requiere que `domador serve` esté corriendo** en el mismo puerto (8787 por defecto).
-- `domador-tray` deja un icono en la bandeja del sistema. El motor corre aparte: cerrar la ventana de Edge no lo apaga. Menú: Abrir Domador, Abrir carpeta, Salir.
-- La UI es HTML/JS plano sin build: tabla de procesos, reglas, actividad del motor, ajustes y medidores por núcleo.
+- `domador-ui` abre la **UI nativa egui/wgpu**: ventana propia, sin Edge, sin WebView2 y sin pestañas. Es la UI principal desde v0.6.
+- `domador-tray` deja un icono **animado** en la bandeja. Menú: Abrir Domador, Abrir carpeta, **Reiniciar como administrador**, Salir. Cerrar la UI no apaga el motor.
+- La UI web HTML/JS sigue existiendo sólo como respaldo de la API (`http://127.0.0.1:8787/`).
 
 ## Seguridad
 
@@ -94,6 +97,7 @@ Leé esto antes de apretar Full Power.
 - **El plan de energía original se restaura al salir**, también con Ctrl+C. Si el proceso muere de golpe (crash, Task Manager), el plan queda como estaba en ese momento.
 - **No requiere admin para lo básico**: prioridades, afinidad y EcoQoS sobre procesos propios funcionan sin elevar. Procesos del sistema y algunos servicios van a rechazar los cambios; la UI muestra `sin admin` cuando corre sin privilegios.
 - **Sí requiere admin** para: prioridades sobre procesos de otros usuarios, `realtime`, y varias operaciones de plan de energía en máquinas con políticas de grupo.
+- **Admin sin ceremonia**: la UI tiene `Activar admin` y la bandeja tiene `Reiniciar como administrador` (UAC una vez). Para que arranque elevado en cada login sin UAC, corré una vez `scripts/install-admin.ps1` como administrador: crea la tarea programada `Domador` con `RunLevel Highest` y retira el acceso de Startup duplicado.
 - **La API escucha sólo en loopback** y los POST exigen el header `X-Domador: 1`. Eso es un guard CSRF, no autenticación: cualquier proceso local puede llamarla. No la expongas a la red.
 - **Sin telemetría.** No hay analytics, ni crash reporting, ni update check. El binario no abre conexiones salientes.
 
@@ -199,12 +203,12 @@ Medición real en esta notebook (Legion, 16 hilos lógicos, Windows 11), misma s
 | Cambios de prioridad en 42 s (2 hogs) | 8 (4 por proceso: 2 bajadas + 2 restauraciones) | 4 (2 por proceso: 1 bajada + 1 restauración) |
 | Primer throttle | 0,1 s | 8,8 s |
 | Latencia de acciones p50 / p95 | sin API ni CLI documentada | 2,37 / 25,42 ms |
-| Distribución | instalador + servicio | un `.exe` de 2,06 MB |
+| Distribución | instalador + servicio | motor 2,3 MB + UI nativa 5,4 MB + bandeja 409 KB |
 | Churn real (30 min de su log) | 35 bajadas sobre 5 procesos, incluidos Chrome, WebView y ChatGPT | — |
 
-> Benchmark medido con v0.4.2. El motor de v0.5.0 conserva el mismo sampler; la pestaña Salud sólo consulta GPU/memoria cuando la UI está abierta.
+> Benchmark del **motor** medido con v0.4.2; el sampler es el mismo en v0.6. La UI nativa es una ventana egui aparte y no forma parte del motor, así que cuando jugás podés cerrarla sin costo.
 
-**Lectura honesta:** Lasso gana en reacción inicial; Domador gana en huella (17,3 MB y 0,12% contra 20 MB y 0,19%), en estabilidad (la mitad de cambios de prioridad), en tamaño de distribución, en automatización (API/MCP) y en no necesitar servicio. La UI de Domador es una pestaña del Edge que ya está abierto, así que su costo no es comparable con una GUI nativa; el motor es el número que importa cuando jugás.
+**Lectura honesta:** Lasso gana en reacción inicial; Domador gana en huella (17,3 MB y 0,12% contra 20 MB y 0,19%), en estabilidad (la mitad de cambios de prioridad), en tamaño de distribución, en automatización (API/MCP) y en no necesitar servicio. La UI nativa desde v0.6 elimina la pestaña de Edge; el motor es el número que importa cuando jugás.
 
 La vía rápida de ProBalance, medida aparte con un hog de 4 hilos (25% de la máquina), baja la prioridad en **1,8 s** sin esperar los 9 s. Los picos moderados siguen la vía lenta para no flapear.
 
@@ -224,17 +228,18 @@ src/
 ├── engine.rs   Loop del motor: evaluación ProBalance, aplicación de reglas, watchdogs, cooldown
 ├── power.rs    Planes de energía, perfiles y restauración al salir
 ├── api.rs      Servidor HTTP local (tiny_http) y handlers JSON
-└── mcp.rs      Servidor MCP por stdio sobre las mismas operaciones que la API
-ui/             UI web (HTML/CSS/JS, sin build)
+├── mcp.rs      Servidor MCP por stdio sobre las mismas operaciones que la API
+└── bin/        ui.rs (UI nativa egui/wgpu), tray.rs (bandeja animada), hog.rs (carga de prueba)
+ui/             UI web de respaldo (HTML/CSS/JS, sin build)
 tests/          Tests de integración
 bench/          Scripts y resultados de benchmark
 ```
 
-El motor corre en un hilo propio y publica un snapshot que la API serializa; los handlers de escritura encolan acciones y esperan el resultado. `win.rs` es el único módulo con `unsafe`, y todo lo que abre un handle lo cierra con un guard.
+El motor corre en un hilo propio y publica un snapshot que la API serializa; los handlers de escritura encolan acciones y esperan el resultado. `win.rs` es el único módulo con `unsafe`, y todo lo que abre un handle lo cierra con un guard. La UI nativa es un proceso aparte que habla con la API; se puede cerrar sin tocar el motor.
 
 ## Roadmap
 
-- [ ] Servicio elevado (para aplicar reglas antes del login y a procesos protegidos)
+- [ ] Tarea programada elevada para arrancar como admin sin UAC en cada login
 - [ ] CPU sets en lugar de sólo máscaras de afinidad
 - [ ] Instalador MSI con actualización limpia
 - [ ] Historial de consumo por proceso (gráficos de 24 h)

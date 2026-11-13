@@ -1,14 +1,19 @@
 [package]
 name = "domador"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 description = "Control de procesos y rendimiento para Windows, en Rust"
+build = "build.rs"
 
 [[bin]]
 name = "domador-tray"
 path = "src/bin/tray.rs"
+
+[[bin]]
+name = "domador-ui"
+path = "src/bin/ui.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -28,6 +33,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 sysinfo = "0.33"
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+egui_extras = { version = "0.31", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+winres = "0.1"
 
 [profile.release]
 lto = "thin"

@@ -82,6 +82,34 @@ fn handle(mut request: Request, engine: Shared) {
             "/" | "/index.html" => return static_file(request, "index.html"),
             "/styles.css" => return static_file(request, "styles.css"),
             "/app.js" => return static_file(request, "app.js"),
+            "/favicon.ico" => {
+                return binary_file(
+                    request,
+                    include_bytes!("../assets/domador.ico"),
+                    "image/x-icon",
+                )
+            }
+            "/icon-32.png" => {
+                return binary_file(
+                    request,
+                    include_bytes!("../assets/icon-32.png"),
+                    "image/png",
+                )
+            }
+            "/icon-64.png" => {
+                return binary_file(
+                    request,
+                    include_bytes!("../assets/icon-64.png"),
+                    "image/png",
+                )
+            }
+            "/icon-256.png" => {
+                return binary_file(
+                    request,
+                    include_bytes!("../assets/icon-256.png"),
+                    "image/png",
+                )
+            }
             _ => {
                 return reply(
                     request,
@@ -222,6 +250,10 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, String> 
             let (freed, count) = lock(engine).trim_all();
             Ok(json!({"ok": true, "freed": freed, "count": count}))
         }
+        "/api/trim-idle" => {
+            let (freed, count) = lock(engine).trim_background();
+            Ok(json!({"ok": true, "freed": freed, "count": count}))
+        }
         "/api/kill" => {
             let pid = pid_of(body)?;
             lock(engine).kill(pid)?;
@@ -356,6 +388,17 @@ fn static_file(request: Request, name: &str) -> () {
         .with_status_code(200)
         .with_header(Header::from_bytes("Content-Type", content_type).expect("header válido"))
         .with_header(Header::from_bytes("Cache-Control", "no-store").expect("header válido"))
+        .with_header(
+            Header::from_bytes("X-Content-Type-Options", "nosniff").expect("header válido"),
+        );
+    let _ = request.respond(response);
+}
+
+fn binary_file(request: Request, body: &'static [u8], content_type: &str) -> () {
+    let response = Response::from_data(body)
+        .with_status_code(200)
+        .with_header(Header::from_bytes("Content-Type", content_type).expect("header válido"))
+        .with_header(Header::from_bytes("Cache-Control", "max-age=86400").expect("header válido"))
         .with_header(
             Header::from_bytes("X-Content-Type-Options", "nosniff").expect("header válido"),
         );
