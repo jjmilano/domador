@@ -962,6 +962,9 @@ impl DomadorUi {
         if !admin && ui.button("Reiniciar como administrador").clicked() {
             self.relaunch_admin();
         }
+        if admin && ui.button("Arrancar siempre como admin").clicked() {
+            self.action("/api/admin-task", json!({}), "Creando tarea de inicio");
+        }
         ui.add_space(18.0);
         ui.label(egui::RichText::new("Motor").strong());
         if let Some(path) = state

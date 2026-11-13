@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -339,6 +340,36 @@ fn dispatch(path: &str, body: &Value, engine: &Shared) -> Result<Value, String> 
                 std::process::exit(0);
             });
             Ok(json!({"ok": true}))
+        }
+        "/api/admin-task" => {
+            if !crate::win::is_admin() {
+                return Err("necesito correr como administrador para crear la tarea".into());
+            }
+            let script = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("install-admin.ps1")))
+                .ok_or_else(|| "no pude resolver la carpeta de instalación".to_string())?;
+            if !script.exists() {
+                return Err(format!("falta {}", script.display()));
+            }
+            let output = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    &script.to_string_lossy(),
+                ])
+                .output()
+                .map_err(|err| format!("no pude lanzar PowerShell: {err}"))?;
+            if output.status.success() {
+                Ok(json!({"ok": true, "detail": String::from_utf8_lossy(&output.stdout)}))
+            } else {
+                Err(format!(
+                    "la tarea falló: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+            }
         }
         other => Err(format!("endpoint desconocido: {other}")),
     }
