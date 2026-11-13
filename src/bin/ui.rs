@@ -3460,14 +3460,19 @@ impl DomadorUi {
                 .map(|v| format!("{v:.0} °C"))
                 .unwrap_or_else(|| "—".to_string());
             ui.horizontal(|ui| {
+                let reported = view
+                    .fans
+                    .iter()
+                    .filter(|fan| fan.rpm > 0 || fan.max > 0)
+                    .count();
                 dot(ui, if view.available { OK } else { WARN }, 3.0);
                 ui.add(
                     egui::Label::new(
                         RichText::new(format!(
-                            "{} · BIOS {} · CPU {cpu} · GPU {gpu} · {} fans · {}",
+                            "{} · BIOS {} · CPU {cpu} · GPU {gpu} · {} fan(s) reportado(s) · {}",
                             view.model,
                             view.bios,
-                            view.fans.len(),
+                            reported,
                             if view.available {
                                 "WMI OK"
                             } else {
