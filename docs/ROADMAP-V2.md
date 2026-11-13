@@ -87,6 +87,7 @@ Tests actuales: **14 en verde, 1 ignorado** (`cargo test --all-targets`) — con
 | P1.8 | Gestión de inicio | Pendiente | Listar/deshabilitar startups con confirmación y reversión |
 | P1.9 | Más tools MCP | Pendiente | `mem_info`, `trim_idle`, `admin_status`; errores JSON-RPC correctos |
 | P1.10 | Actualización opt-in integrada | Pendiente | La UI puede lanzar `check-update.ps1`; nunca silencioso |
+| P1.11 | Legion 5 Pro: modos térmicos, fans y límites de CPU | Pendiente | WMI `LENOVO_GAMEZONE_DATA`, `LENOVO_FAN_METHOD`, `LENOVO_CPU_METHOD`; admin, backup de curva stock y un solo dueño del EC. Detalle en `docs/LEGION-TUNING.md` |
 
 ### P2 — exploratorio
 
