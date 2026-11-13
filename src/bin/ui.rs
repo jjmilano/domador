@@ -1081,8 +1081,12 @@ fn cpu_color(cpu: f64) -> Color32 {
         COPPER_HI
     } else if cpu >= 5.0 {
         BRASS
-    } else {
+    } else if cpu >= 1.0 {
         OK
+    } else if cpu >= 0.05 {
+        MUTED
+    } else {
+        FAINT
     }
 }
 
@@ -1432,15 +1436,21 @@ fn section(ui: &mut egui::Ui, title: &str, right: Option<&str>) {
 fn kv(ui: &mut egui::Ui, label: &str, value: &str, color: Color32) {
     let width = ui.available_width();
     let height = 19.0;
-    let value_width = 118.0_f32.min(width * 0.52);
+    let value_width = 220.0_f32.min(width * 0.62);
     let label_width = (width - value_width - 8.0).max(20.0);
     ui.allocate_ui_with_layout(
         Vec2::new(width, height),
         egui::Layout::left_to_right(Align::Center),
         |ui| {
-            ui.add_sized(
-                [label_width, height],
-                egui::Label::new(RichText::new(label).size(11.0).color(MUTED)).truncate(),
+            ui.allocate_ui_with_layout(
+                Vec2::new(label_width, height),
+                egui::Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_width(label_width);
+                    ui.add(
+                        egui::Label::new(RichText::new(label).size(11.0).color(MUTED)).truncate(),
+                    );
+                },
             );
             ui.allocate_ui_with_layout(
                 Vec2::new(value_width, height),
@@ -1573,13 +1583,15 @@ fn nav_item(
             FontId::proportional(12.5),
             fg,
         );
-        painter.text(
-            Pos2::new(rect.right() - 10.0, rect.center().y),
-            Align2::RIGHT_CENTER,
-            hint,
-            FontId::monospace(9.5),
-            FAINT,
-        );
+        if hovered && !hint.is_empty() {
+            painter.text(
+                Pos2::new(rect.right() - 10.0, rect.center().y),
+                Align2::RIGHT_CENTER,
+                format!("Ctrl {hint}"),
+                FontId::monospace(9.0),
+                a(FAINT, 200),
+            );
+        }
     }
     if compact {
         response.on_hover_text(label)
@@ -2619,6 +2631,9 @@ impl DomadorUi {
         let show_pid = ui.available_width() >= 780.0;
         let selected = self.selected;
         let sort = self.sort;
+        let hover_id = Id::new("domador_hover_pid");
+        let hovered_pid: Option<u32> = ui.ctx().data(|d| d.get_temp(hover_id));
+        let mut next_hover: Option<u32> = None;
         let mut clicked_sort: Option<SortBy> = None;
         let mut clicked_action: Option<Action> = None;
 
@@ -2696,6 +2711,7 @@ impl DomadorUi {
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
                         let is_selected = selected == Some(pid);
+                        let show_actions = is_selected || hovered_pid == Some(pid);
                         let mut row_acted = false;
                         row.set_selected(is_selected);
                         row.col(|ui| {
@@ -2740,6 +2756,20 @@ impl DomadorUi {
                             });
                         }
                         row.col(|ui| {
+                            let cell = ui.max_rect();
+                            if cpu >= 0.05 {
+                                let frac = ((cpu / 100.0).sqrt() as f32).clamp(0.04, 1.0);
+                                let track = Rect::from_min_size(
+                                    Pos2::new(cell.left() + 6.0, cell.bottom() - 7.0),
+                                    Vec2::new(cell.width() - 6.0, 2.0),
+                                );
+                                ui.painter().rect_filled(track, 1.0, a(BORDER_SOFT, 120));
+                                let fill = Rect::from_min_size(
+                                    Pos2::new(track.right() - track.width() * frac, track.top()),
+                                    Vec2::new(track.width() * frac, 2.0),
+                                );
+                                ui.painter().rect_filled(fill, 1.0, a(cpu_color(cpu), 190));
+                            }
                             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(
                                     RichText::new(format!("{cpu:.1}%"))
@@ -2763,6 +2793,11 @@ impl DomadorUi {
                             if protected {
                                 badge(ui, "Sistema", FAINT, a(FAINT, 22))
                                     .on_hover_text("Proceso protegido: Domador no lo modifica");
+                            } else if matches!(prio_label, "—" | "-" | "?" | "–") {
+                                ui.label(RichText::new("n/d").size(10.0).color(a(FAINT, 180)))
+                                    .on_hover_text(
+                                        "Windows no deja leer la prioridad de este proceso.",
+                                    );
                             } else {
                                 let (fg, bg) = prio_colors(prio);
                                 badge(ui, prio_label, fg, bg).on_hover_text(format!(
@@ -2771,6 +2806,11 @@ impl DomadorUi {
                             }
                         });
                         row.col(|ui| {
+                            if !show_actions {
+                                ui.label(RichText::new("···").size(12.0).color(a(FAINT, 120)))
+                                    .on_hover_text("Pasá el mouse por la fila para ver acciones");
+                                return;
+                            }
                             ui.spacing_mut().item_spacing.x = 4.0;
                             ui.horizontal(|ui| {
                                 if btn(
@@ -2823,6 +2863,9 @@ impl DomadorUi {
                         let resp = row
                             .response()
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.contains_pointer() {
+                            next_hover = Some(pid);
+                        }
                         if resp.clicked() && !row_acted {
                             self.selected = Some(pid);
                             self.open_detail(pid);
@@ -2831,6 +2874,10 @@ impl DomadorUi {
                 });
             });
 
+        ui.ctx().data_mut(|d| match next_hover {
+            Some(pid) => d.insert_temp(hover_id, pid),
+            None => d.remove::<u32>(hover_id),
+        });
         if let Some(key) = clicked_sort {
             self.set_sort(key);
         }
@@ -4165,6 +4212,14 @@ impl DomadorUi {
 impl eframe::App for DomadorUi {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(500));
+        // Barra de título del color de la cabina (reintenta unos frames
+        // hasta que la ventana exista).
+        let tint_id = Id::new("domador_titlebar_tries");
+        let tries: u32 = ctx.data(|d| d.get_temp(tint_id)).unwrap_or(0);
+        if tries < 60 {
+            let done = tint_titlebar();
+            ctx.data_mut(|d| d.insert_temp(tint_id, if done { u32::MAX } else { tries + 1 }));
+        }
         // Los toasts no se quedan pegados: 6 segundos y se van.
         {
             let mut guard = self.shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -4598,12 +4653,13 @@ fn side_kv(ui: &mut egui::Ui, key: &str, value: &str) {
                 egui::Label::new(RichText::new(key).size(10.5).color(MUTED)).truncate(),
             );
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(12.0);
                 ui.label(
                     RichText::new(value)
                         .size(11.0)
                         .monospace()
                         .strong()
-                        .color(TEXT),
+                        .color(if value == "0" { FAINT } else { TEXT }),
                 );
             });
         },
@@ -7506,6 +7562,40 @@ fn legion_preview(ui: &mut egui::Ui, width: f32) {
             .wrap(),
         );
     });
+}
+
+/// Pinta la barra de título nativa con los tonos de la cabina (Windows 11).
+/// En Windows 10 los atributos de color se ignoran sin romper nada.
+fn tint_titlebar() -> bool {
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
+    let title: Vec<u16> = "Domador\0".encode_utf16().collect();
+    let me = std::process::id();
+    let colorref =
+        |c: Color32| -> u32 { c.r() as u32 | ((c.g() as u32) << 8) | ((c.b() as u32) << 16) };
+    unsafe {
+        let mut hwnd = std::ptr::null_mut();
+        loop {
+            hwnd = FindWindowExW(std::ptr::null_mut(), hwnd, std::ptr::null(), title.as_ptr());
+            if hwnd.is_null() {
+                return false;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == me {
+                break;
+            }
+        }
+        let dark: i32 = 1;
+        let caption = colorref(PANEL);
+        let text = colorref(MUTED);
+        let border = colorref(BORDER_SOFT);
+        DwmSetWindowAttribute(hwnd, 20, &dark as *const i32 as _, 4);
+        DwmSetWindowAttribute(hwnd, 35, &caption as *const u32 as _, 4);
+        DwmSetWindowAttribute(hwnd, 36, &text as *const u32 as _, 4);
+        DwmSetWindowAttribute(hwnd, 34, &border as *const u32 as _, 4);
+    }
+    true
 }
 
 fn icon() -> Option<Arc<egui::IconData>> {
