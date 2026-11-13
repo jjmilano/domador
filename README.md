@@ -18,7 +18,18 @@ Domador hace lo mismo (y algunas cosas más) con el código a la vista: reglas p
 
 ## Estado
 
-**v0.6.2**, usable y probado en Windows 11 x64. El motor Rust, la **UI nativa egui/eframe** (backend `glow`/OpenGL, sin WebView), la bandeja, la API HTTP y el servidor MCP están conectados. `cargo test --all-targets` deja **14 tests en verde y 1 ignorado** (bug conocido: body `chunked` > 64 KiB devuelve 400 en vez de 413) y cubre prioridades, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación/Host/body cap de la API, handshake MCP, snapshot NT, `powercfg`, contrato de `/api/state`, familias y topes de MemGuard. El plan de energía se restaura en una salida ordenada (Ctrl+C, `domador stop` o Salir desde la bandeja); un crash no lo garantiza.
+**v0.7.0** (en rama `mejoras-v0.7`), usable y probado en Windows 11 x64. El motor Rust, la **UI nativa egui/eframe** (backend `glow`/OpenGL, sin WebView), la bandeja, la API HTTP y el servidor MCP están conectados. `cargo test --all-targets` deja **39 tests en verde** (1 ignorado: diagnóstico WMI de Legion que requiere hardware) y cubre prioridades, afinidad, EcoQoS, trim, restauración, reglas persistentes, autenticación/Host/body cap de la API, handshake MCP, snapshot NT, `powercfg`, contrato de `/api/state`, familias y topes de MemGuard. El plan de energía se restaura en una salida ordenada (Ctrl+C, `domador stop` o Salir desde la bandeja); un crash no lo garantiza.
+
+### Novedades de v0.7.0
+
+- **Sin tirones:** `nvidia-smi` y la lectura de planes de energía corren en un hilo propio; `/api/state` sólo lee cache (de picos de 250 ms a ~4 ms por poll medido con curl).
+- **Payload a la mitad:** `/api/state` ya no manda la historia de CPU por proceso (~240 KB → ~143 KB) y la UI pollea cada 1 s.
+- **Trims que no bloquean:** `trim-all`, `trim-idle` y `mem/relief` eligen candidatos con el lock y liberan memoria sin él.
+- **Un motor por config** (antes dos motores se pisaban el `config.json`).
+- **Juego no adivina:** sin `target` responde 400; la UI manda `"auto"`, que usa la última app que no es Domador (antes el "juego" era la propia UI).
+- **UI:** tarjetas **MemGuard** y **Familias** en Salud, aviso si el motor es de otra versión, barra de título oscura, acciones de la tabla al pasar el mouse, barra de CPU por proceso, flechas de orden dibujadas, Ajustes alineado.
+- **MCP:** `domador_mem_info`, `domador_trim_idle` y `domador_families`.
+- Hallazgos QA v2 resueltos: A1–A7, A9, A10 (ver `docs/QA-V2.md`).
 
 La app son **tres binarios chicos**:
 
@@ -215,7 +226,9 @@ mcp_servers:
     args: ["mcp"]
 ```
 
-Reiniciá el cliente después de agregarlo. Las herramientas se llaman `domador_status`, `domador_processes`, `domador_set_priority`, `domador_set_affinity`, `domador_set_eco`, `domador_profile`, `domador_add_rule`, `domador_restore`, `domador_power_plans` y `domador_log`.
+Reiniciá el cliente después de agregarlo. Las herramientas se llaman `domador_status`, `domador_processes`, `domador_set_priority`, `domador_set_affinity`, `domador_set_eco`, `domador_profile`, `domador_add_rule`, `domador_restore`, `domador_power_plans`, `domador_log`, `domador_mem_info` (presión de memoria y top de memoria privada), `domador_trim_idle` (alivio conservador de fondo) y `domador_families` (Chrome/WebView2/Electron sumados, con acciones en grupo).
+
+`domador_profile` con `gaming` exige `target`: el nombre del ejecutable o `"auto"` para la última app usada que no sea Domador.
 
 El servidor MCP habla con la API en el puerto 8787 por defecto. Si levantás `serve --port 9000`, pasale el mismo a `mcp --port 9000` o definí `DOMADOR_PORT=9000` en el entorno del cliente.
 
@@ -369,7 +382,7 @@ Se corre a mano; CI no publica nada. Ningún paso se saltea porque "compila igua
 - [ ] `Cargo.toml` con la versión nueva y `Cargo.lock` actualizado; README y roadmap dicen la misma versión.
 - [ ] `cargo fmt --all -- --check` sin diferencias.
 - [ ] `cargo clippy --all-targets -- -D warnings` sin warnings.
-- [ ] `cargo test --all-targets` en verde (14 pasan; 1 ignorado por bug conocido de body chunked).
+- [ ] `cargo test --all-targets` en verde (39 pasan; 1 ignorado: diagnóstico WMI de Legion).
 - [ ] `cargo build --release --bins` genera los **tres** `.exe` y el icono steampunk está incrustado (Propiedades → Detalles; taskbar a 16 px).
 - [ ] `python bench/bench.py --check` pasa; si se publican métricas nuevas, `python bench/bench.py` se corrió en la misma máquina y quedó `results-rs.json` con fecha.
 - [ ] `powershell -File installer\build.ps1` genera el setup y `SHA256SUMS.txt` (requiere Inno Setup 6.3+; `-Sign` si hay certificado).
@@ -406,14 +419,14 @@ El detalle, prioridades y criterios de aceptación están en [`docs/ROADMAP-V2.m
 
 - **Windows 10/11 x64 solamente.** No hay build ARM64 ni Linux.
 - **La UI nativa necesita una GPU/OpenGL funcional.** Si falla, queda la UI web de respaldo; no hay render por software garantizado.
-- **La UI nativa usa el puerto 8787 fijo.** `--port` mueve la API y el MCP, no la UI.
+- **Puerto de la UI:** `domador` le pasa a `domador-ui.exe` el puerto real por `DOMADOR_PORT`. Si abrís la UI suelta contra un motor en otro puerto, definí `DOMADOR_PORT` a mano.
 - **ProBalance y SmartTrim vienen apagados.** Los perfiles no los activan; hay que prenderlos a conciencia.
-- **MemGuard existe en motor y API, pero no en la UI.** Avisa y puede aliviar working sets de fondo; no mata. Se configura por `POST /api/memguard` o editando `memguard` en `config.json`; falta la tarjeta en Salud.
+- **MemGuard** avisa y puede aliviar working sets de fondo; no mata. Tiene tarjeta en **Salud** (nivel, commit, RAM libre, último alivio, interruptores y "Aliviar ahora") y tool MCP `domador_mem_info`.
 - **El watchdog puede matar** si se configura en `kill`; por defecto sólo avisa.
 - **Sin firma de código y sin instalador publicado.** El fuente del setup está, pero no hay artefacto compilado/firmado; SmartScreen va a advertir.
 - **El benchmark es de una sola máquina y una sola corrida.** No hay FPS ni pruebas de estrés de 24 h; la línea base de Lasso está cacheada.
 - **La API no tiene autenticación real**, sólo loopback + header CSRF. No la expongas.
-- **Bug conocido:** un body `chunked` mayor a 64 KiB devuelve 400 en vez de 413; hay un test ignorado que lo documenta.
+- **Un motor por config:** un segundo `domador` con el mismo `config.json` no arranca otro motor; abre la UI contra el que ya corre (mutex con nombre por ruta de config).
 - **La captura sigue siendo de v0.6.0** y los binarios ya publicados de v0.6.2 son anteriores al icono steampunk; el build local ya lo tiene embebido.
 - **No hay telemetría, update check automático ni crash reporting.** El chequeo de updates es manual y opt-in (`check-update.ps1`); si algo falla, el log local es lo único que hay.
 

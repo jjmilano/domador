@@ -149,7 +149,7 @@ fn tools() -> Value {
                 "required": ["name"],
                 "properties": {
                     "name": {"type": "string", "enum": ["full_power", "gaming", "ai", "balanced"]},
-                    "target": {"type": "string", "description": "Ejecutable del juego (opcional)"}
+                    "target": {"type": "string", "description": "Ejecutable del juego. Obligatorio para gaming; \"auto\" usa la última app en primer plano que no sea Domador"}
                 }
             }
         },
@@ -179,6 +179,32 @@ fn tools() -> Value {
             "name": "domador_power_plans",
             "description": "Lista los planes de energía y el activo.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "domador_mem_info",
+            "description": "Presión de memoria (commit, RAM libre, nivel de MemGuard), composición y los procesos que más memoria privada usan.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"top": {"type": "number", "description": "Cuántos procesos listar (default 10)"}}
+            }
+        },
+        {
+            "name": "domador_trim_idle",
+            "description": "Alivio conservador: recorta el working set de hasta 10 procesos de fondo sin ventana y con CPU baja. No cierra nada. Devuelve bytes liberados.",
+            "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "domador_families",
+            "description": "Agrupa Chrome/Edge, WebView2 y Electron: cuántos procesos, CPU y memoria suman. Con family+action aplica en grupo: trim, eco (enabled), priority (cls) o restore.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "family": {"type": "string", "description": "Clave de familia, ej. chromium, webview2, electron"},
+                    "action": {"type": "string", "enum": ["trim", "eco", "priority", "restore"]},
+                    "enabled": {"type": "boolean"},
+                    "cls": {"type": "string"}
+                }
+            }
         },
         {
             "name": "domador_log",
@@ -320,6 +346,28 @@ fn call_tool(port: u16, name: &str, args: &Value) -> Result<Value, String> {
             let state = get(port, "/api/state")?;
             Ok(state.get("power").cloned().unwrap_or(json!({})))
         }
+        "domador_mem_info" => {
+            let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let mut mem = get(port, "/api/mem")?;
+            if let Some(list) = mem.get_mut("top").and_then(|v| v.as_array_mut()) {
+                list.truncate(top);
+            }
+            Ok(mem)
+        }
+        "domador_trim_idle" => post(port, "/api/trim-idle", json!({})),
+        "domador_families" => match args.get("action").and_then(|v| v.as_str()) {
+            Some(action) => {
+                let family = str_arg(args, "family")?;
+                let mut body = json!({"family": family, "action": action});
+                for key in ["enabled", "cls"] {
+                    if let Some(value) = args.get(key) {
+                        body[key] = value.clone();
+                    }
+                }
+                post(port, "/api/family", body)
+            }
+            None => get(port, "/api/families"),
+        },
         "domador_log" => {
             let state = get(port, "/api/state")?;
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(30) as usize;

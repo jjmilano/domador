@@ -32,6 +32,22 @@ cargo test --test qa_contract -- --ignored # reproduce el bug del chunked (falla
 
 ---
 
+## Estado de los hallazgos (v0.7.0, rama `mejoras-v0.7`)
+
+| # | Estado | Cómo |
+|---|---|---|
+| A1 | Resuelto | GPU y planes en hilo propio (`main.rs`, `Engine::use_external_probes`); `/api/state` ~4 ms sin picos |
+| A2 | Resuelto | Mutex con nombre por config (`win::single_instance`); el segundo `run` abre la UI contra el motor existente |
+| A3 | Resuelto | Lectura con tope `MAX_BODY + 1`; `body_cap_chunked_deberia_ser_413` ya no está ignorado |
+| A4 | Resuelto | `gaming` exige `target`; `"auto"` usa la última app que no es Domador. Test en `smoke.rs` |
+| A5 | Resuelto | `hist` con `skip_serializing`; poll de la UI a 1 s. ~240 KB → ~143 KB |
+| A6 | Resuelto (API) | `trim_pids` fuera del lock en `trim-all`, `trim-idle` y `mem/relief`. El alivio automático de MemGuard sigue dentro del tick |
+| A7 | Resuelto | `open_ui` pasa `DOMADOR_PORT`; la UI avisa si la versión del motor no coincide |
+| A8 | Abierto | — |
+| A9 | Resuelto | `cpus` con elementos no enteros → 400 "cpus debe ser una lista de enteros". Test en `smoke.rs` |
+| A10 | Resuelto | `api_roundtrip_and_auth` borra su config |
+| A11 | Parcial | Header PID alineado, flechas de orden dibujadas, acciones sólo en hover; contraste de microcopy sin medir |
+
 ## Hallazgos
 
 ### A1 · Alta · `/api/state` lanza procesos externos con el mutex del motor tomado → tirones de 100–250 ms en la UI

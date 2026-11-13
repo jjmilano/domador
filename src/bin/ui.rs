@@ -1661,13 +1661,11 @@ fn sort_cell(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         painter.rect_filled(rect, 4.0, a(CARD_HOVER, 160));
     }
-    let mut text = label.to_string();
-    if active {
-        text.push_str(if sort.desc { " ↓" } else { " ↑" });
-    }
+    // La flecha se dibuja: la fuente por defecto no trae ↓/↑ y salía "◻".
     let font = FontId::proportional(10.0);
+    let arrow = if active { 10.0 } else { 0.0 };
     let pos = if right {
-        Pos2::new(rect.right() - 2.0, rect.center().y)
+        Pos2::new(rect.right() - 2.0 - arrow, rect.center().y)
     } else {
         Pos2::new(rect.left() + 2.0, rect.center().y)
     };
@@ -1676,7 +1674,21 @@ fn sort_cell(
     } else {
         Align2::LEFT_CENTER
     };
-    painter.text(pos, align, text, font, fg);
+    let text_rect = painter.text(pos, align, label, font, fg);
+    if active {
+        let cx = text_rect.right() + 6.0;
+        let cy = rect.center().y;
+        let (tip, base) = if sort.desc { (3.0, -2.0) } else { (-3.0, 2.0) };
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                Pos2::new(cx - 3.5, cy + base),
+                Pos2::new(cx + 3.5, cy + base),
+                Pos2::new(cx, cy + tip),
+            ],
+            fg,
+            Stroke::NONE,
+        ));
+    }
     if response.clicked() {
         Some(key)
     } else {
@@ -2389,45 +2401,74 @@ impl DomadorUi {
                     .fill(BG)
                     .inner_margin(Margin::symmetric(18, 14)),
             )
-            .show(ctx, |ui| match self.tab {
-                Tab::Processes => self.processes(ui),
-                Tab::Health => {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                        )
-                        .show(ui, |ui| {
-                            let width = ui.available_width();
-                            ui.set_width(width);
-                            self.health(ui);
-                        });
-                }
-                Tab::Settings => {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                        )
-                        .show(ui, |ui| {
-                            let width = ui.available_width();
-                            ui.set_width(width);
-                            self.settings(ui);
-                        });
-                }
-                Tab::Legion => {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                        )
-                        .show(ui, |ui| {
-                            let width = ui.available_width();
-                            ui.set_width(width);
-                            self.legion(ui);
-                        });
+            .show(ctx, |ui| {
+                self.version_notice(ui);
+                match self.tab {
+                    Tab::Processes => self.processes(ui),
+                    Tab::Health => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
+                            .show(ui, |ui| {
+                                let width = ui.available_width();
+                                ui.set_width(width);
+                                self.health(ui);
+                            });
+                    }
+                    Tab::Settings => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
+                            .show(ui, |ui| {
+                                let width = ui.available_width();
+                                ui.set_width(width);
+                                self.settings(ui);
+                            });
+                    }
+                    Tab::Legion => {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                            )
+                            .show(ui, |ui| {
+                                let width = ui.available_width();
+                                ui.set_width(width);
+                                self.legion(ui);
+                            });
+                    }
                 }
             });
+    }
+
+    /// Si el motor que responde es de otra versión que esta UI, lo dice: los
+    /// endpoints nuevos dan 404 en un motor viejo y parecía que la app estaba
+    /// rota (QA A7).
+    fn version_notice(&mut self, ui: &mut egui::Ui) {
+        let Some(state) = self.state() else {
+            return;
+        };
+        let engine = state
+            .pointer("/app/version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mine = env!("CARGO_PKG_VERSION");
+        if engine.is_empty() || engine == mine {
+            return;
+        }
+        let width = ui.available_width();
+        notice(
+            ui,
+            width,
+            &format!("Motor v{engine} · UI v{mine}"),
+            "El motor que está corriendo es de otra versión que esta ventana. Algunas funciones pueden no responder. Salí desde la bandeja y abrí Domador de nuevo para que arranque el motor actualizado.",
+            WARN,
+        );
+        ui.add_space(10.0);
     }
 
     fn processes(&mut self, ui: &mut egui::Ui) {
@@ -2531,18 +2572,23 @@ impl DomadorUi {
                         ui.horizontal(|ui| {
                             for key in [SortBy::Cpu, SortBy::Ram, SortBy::Name] {
                                 let active = self.sort.key == key;
-                                let mut label = key.label().to_string();
-                                if active {
-                                    label.push_str(if self.sort.desc { " ↓" } else { " ↑" });
-                                }
+                                let label = key.label();
+                                let tip = if !active {
+                                    "Ordenar por esta columna"
+                                } else if self.sort.desc {
+                                    "Mayor primero · clic para invertir"
+                                } else {
+                                    "Menor primero · clic para invertir"
+                                };
                                 if btn(
                                     ui,
-                                    &label,
+                                    label,
                                     66.0,
                                     24.0,
                                     if active { Btn::Primary } else { Btn::Ghost },
                                     true,
                                 )
+                                .on_hover_text(tip)
                                 .clicked()
                                 {
                                     self.set_sort(key);
@@ -2677,7 +2723,7 @@ impl DomadorUi {
                     });
                     if show_pid {
                         header.col(|ui| {
-                            header_label(ui, "PID", false);
+                            header_label(ui, "PID", true);
                         });
                     }
                     header.col(|ui| {
@@ -3100,6 +3146,44 @@ impl DomadorUi {
             memory_card(ui, width, &state);
             ui.add_space(12.0);
             gpu_card(ui, width, &state);
+        }
+
+        ui.add_space(12.0);
+        let mut acted: Option<UiAct> = None;
+        if width >= 720.0 {
+            let col = ((width - 12.0) / 2.0).floor();
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(col, 0.0),
+                    egui::Layout::top_down(Align::Min),
+                    |ui| {
+                        if let Some(act) = memguard_card(ui, col, &state, busy) {
+                            acted = Some(act);
+                        }
+                    },
+                );
+                ui.add_space(12.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(col, 0.0),
+                    egui::Layout::top_down(Align::Min),
+                    |ui| {
+                        if let Some(act) = families_card(ui, col, &state, busy) {
+                            acted = Some(act);
+                        }
+                    },
+                );
+            });
+        } else {
+            if let Some(act) = memguard_card(ui, width, &state, busy) {
+                acted = Some(act);
+            }
+            ui.add_space(12.0);
+            if let Some(act) = families_card(ui, width, &state, busy) {
+                acted = Some(act);
+            }
+        }
+        if let Some((path, body, busy_msg, done)) = acted {
+            self.action(path, body, busy_msg, done);
         }
 
         ui.add_space(12.0);
@@ -4277,6 +4361,251 @@ fn sort_rows(rows: &mut [&Value], sort: SortState) {
 }
 
 // ---------------------------------------------------------------- salud ---
+
+/// Acción pedida por una tarjeta: endpoint, body, texto mientras corre y al terminar.
+type UiAct = (&'static str, Value, &'static str, &'static str);
+
+fn pressure_style(level: &str) -> (&'static str, Color32) {
+    match level {
+        "critical" => ("Crítico", DANGER),
+        "warn" => ("Atención", WARN),
+        _ => ("Tranquilo", OK),
+    }
+}
+
+/// MemGuard: nivel de presión, por qué, último alivio y los dos interruptores.
+/// Nunca mata procesos; el alivio sólo recorta working sets de fondo.
+fn memguard_card(ui: &mut egui::Ui, width: f32, state: &Value, busy: bool) -> Option<UiAct> {
+    let mut act: Option<UiAct> = None;
+    let guard = state.get("memguard");
+    let pressure = state.get("mem_pressure");
+    let Some(pressure) = pressure else {
+        card(ui, width, |ui| {
+            section(ui, "MemGuard", None);
+            ui.label(
+                RichText::new("El motor no reporta MemGuard (¿versión vieja?).")
+                    .size(10.5)
+                    .color(FAINT),
+            );
+        });
+        return None;
+    };
+    let enabled = guard
+        .and_then(|g| g.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let relief = guard
+        .and_then(|g| g.get("relief"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let warn_commit = fnum(guard.and_then(|g| g.get("warn_commit_pct")));
+    let warn_avail = fnum(guard.and_then(|g| g.get("warn_available_pct")));
+    let level = text_of(pressure.get("level"));
+    let commit_pct = fnum(pressure.get("commit_pct"));
+    let avail_pct = fnum(pressure.get("available_pct"));
+    let reliefs = num(pressure.get("reliefs"));
+    let last_at = fnum(pressure.get("last_relief_at"));
+    let last_freed = num(pressure.get("last_relief_freed"));
+    let (label, color) = if enabled {
+        pressure_style(level)
+    } else {
+        ("Apagado", FAINT)
+    };
+
+    card(ui, width, |ui| {
+        section(ui, "MemGuard", Some("vigía de memoria"));
+        ui.horizontal(|ui| {
+            dot(ui, color, 5.0);
+            ui.label(RichText::new(label).size(15.0).strong().color(color));
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                badge(ui, "nunca cierra apps", FAINT, a(FAINT, 18));
+            });
+        });
+        if let Some(reasons) = pressure.get("reasons").and_then(|v| v.as_array()) {
+            for reason in reasons.iter().filter_map(|r| r.as_str()).take(2) {
+                ui.add(egui::Label::new(RichText::new(reason).size(10.5).color(MUTED)).wrap());
+            }
+        }
+        ui.add_space(10.0);
+        let commit_color = if warn_commit > 0.0 && commit_pct >= warn_commit {
+            COPPER_HI
+        } else {
+            BRASS_DIM
+        };
+        kv(
+            ui,
+            "Commit",
+            &format!("{commit_pct:.0}%  ·  avisa en {warn_commit:.0}%"),
+            commit_color,
+        );
+        ui.add_space(4.0);
+        meter(ui, (commit_pct / 100.0) as f32, commit_color);
+        ui.add_space(8.0);
+        let avail_color = if warn_avail > 0.0 && avail_pct <= warn_avail {
+            COPPER_HI
+        } else {
+            OK
+        };
+        kv(
+            ui,
+            "RAM libre",
+            &format!("{avail_pct:.0}%  ·  avisa bajo {warn_avail:.0}%"),
+            avail_color,
+        );
+        ui.add_space(4.0);
+        meter(ui, (avail_pct / 100.0) as f32, avail_color);
+        ui.add_space(10.0);
+        let last = if last_at > 0.0 {
+            format!("{} · {}", rel_time(last_at), fmt_bytes(last_freed))
+        } else {
+            "todavía no".to_string()
+        };
+        kv(ui, "Último alivio", &last, MUTED);
+        kv(ui, "Alivios", &reliefs.to_string(), MUTED);
+        ui.add_space(10.0);
+        hairline(ui, ui.cursor().top(), BORDER_SOFT);
+        ui.add_space(10.0);
+
+        ui.horizontal(|ui| {
+            if switch(ui, Id::new("mg_enabled"), enabled)
+                .on_hover_text("Vigilar commit y RAM libre y avisar en el log")
+                .clicked()
+                && !busy
+            {
+                act = Some((
+                    "/api/memguard",
+                    json!({ "enabled": !enabled }),
+                    "Ajustando MemGuard",
+                    if enabled { "MemGuard apagado" } else { "MemGuard encendido" },
+                ));
+            }
+            ui.label(RichText::new("Vigilar").size(11.5).color(TEXT));
+            ui.add_space(14.0);
+            if switch(ui, Id::new("mg_relief"), relief)
+                .on_hover_text(
+                    "Con presión alta, recorta solo procesos de fondo cada 15 min como mucho",
+                )
+                .clicked()
+                && !busy
+            {
+                act = Some((
+                    "/api/memguard",
+                    json!({ "relief": !relief }),
+                    "Ajustando MemGuard",
+                    if relief { "Alivio automático apagado" } else { "Alivio automático encendido" },
+                ));
+            }
+            ui.label(RichText::new("Aliviar solo").size(11.5).color(TEXT));
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if btn(ui, "Aliviar ahora", 110.0, 28.0, Btn::Secondary, !busy)
+                    .on_hover_text(
+                        "Recorta working sets de hasta 10 procesos de fondo sin ventana. No cierra nada.",
+                    )
+                    .clicked()
+                {
+                    act = Some((
+                        "/api/mem/relief",
+                        json!({}),
+                        "Aliviando memoria",
+                        "Alivio aplicado",
+                    ));
+                }
+            });
+        });
+    });
+    act
+}
+
+/// Familias de procesos (Chrome/Edge, WebView2, Electron): cuánto suman y
+/// acciones en grupo. Las pestañas de Chrome no son "un" proceso.
+fn families_card(ui: &mut egui::Ui, width: f32, state: &Value, busy: bool) -> Option<UiAct> {
+    let mut act: Option<UiAct> = None;
+    let mut families: Vec<&Value> = state
+        .get("families")
+        .and_then(|v| v.as_array())
+        .map(|list| list.iter().collect())
+        .unwrap_or_default();
+    families.sort_by(|a, b| num(b.get("private")).cmp(&num(a.get("private"))));
+    card(ui, width, |ui| {
+        section(ui, "Familias", Some("navegadores y apps web"));
+        if families.is_empty() {
+            ui.label(
+                RichText::new("No hay Chrome, Edge, WebView2 ni Electron abiertos.")
+                    .size(10.5)
+                    .color(FAINT),
+            );
+            return;
+        }
+        ui.label(
+            RichText::new("Cada pestaña o app web es un proceso aparte: acá se ven sumados.")
+                .size(10.0)
+                .color(FAINT),
+        );
+        ui.add_space(8.0);
+        for family in families.iter().take(5) {
+            let key = text_of(family.get("family")).to_string();
+            let label = text_of(family.get("label"));
+            let count = num(family.get("count"));
+            let cpu = fnum(family.get("cpu"));
+            let private = num(family.get("private"));
+            let throttled = num(family.get("throttled"));
+            ui.horizontal(|ui| {
+                avatar(ui, label, 22.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(label).size(12.0).color(TEXT));
+                    let mut meta =
+                        format!("{count} procesos · {} · CPU {cpu:.1}%", fmt_bytes(private));
+                    if throttled > 0 {
+                        meta.push_str(&format!(" · {throttled} regulados"));
+                    }
+                    ui.label(RichText::new(meta).size(10.0).monospace().color(MUTED));
+                });
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    if btn(ui, "Restaurar", 72.0, 24.0, Btn::Ghost, !busy)
+                        .on_hover_text("Deshace los cambios de Domador en toda la familia")
+                        .clicked()
+                    {
+                        act = Some((
+                            "/api/family",
+                            json!({ "family": key, "action": "restore" }),
+                            "Restaurando familia",
+                            "Familia restaurada",
+                        ));
+                    }
+                    if btn(ui, "Liberar", 60.0, 24.0, Btn::Secondary, !busy)
+                        .on_hover_text(
+                            "Recorta el working set de todos sus procesos. No cierra nada.",
+                        )
+                        .clicked()
+                    {
+                        act = Some((
+                            "/api/family",
+                            json!({ "family": key, "action": "trim" }),
+                            "Liberando memoria de la familia",
+                            "Memoria liberada",
+                        ));
+                    }
+                    if btn(ui, "Eco", 44.0, 24.0, Btn::Secondary, !busy)
+                        .on_hover_text(
+                            "Modo eficiencia (EcoQoS): menos consumo y calor, mismo funcionamiento",
+                        )
+                        .clicked()
+                    {
+                        act = Some((
+                            "/api/family",
+                            json!({ "family": key, "action": "eco", "enabled": true }),
+                            "Activando modo eficiencia",
+                            "Modo eficiencia activado",
+                        ));
+                    }
+                });
+            });
+            ui.add_space(6.0);
+        }
+    });
+    act
+}
 
 fn memory_card(ui: &mut egui::Ui, width: f32, state: &Value) {
     let mem = state.pointer("/system/mem");

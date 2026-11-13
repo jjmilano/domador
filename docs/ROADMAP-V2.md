@@ -67,7 +67,7 @@ Tests actuales: **14 en verde, 1 ignorado** (`cargo test --all-targets`) — con
 |---|---|---|---|---|
 | P0.1 | Cerrar rediseño de UI nativa | En curso | Agente de UI | Sin texto cortado a 1080p/1440p/125%; foco visible; contraste AA; captura nueva |
 | P0.2 | Captura y assets del README | Pendiente | Docs | `docs/screenshot.png` de la UI nueva; tabla de assets sin archivos WIP |
-| P0.3 | MemGuard: tarjeta en UI y tool MCP | Pendiente | UI + MCP | Tarjeta en Salud con nivel, último alivio y "Aliviar ahora"; tool `mem_info`; medir antes/después |
+| P0.3 | MemGuard: tarjeta en UI y tool MCP | Hecho (v0.7.0), falta medición antes/después | UI + MCP | Tarjeta en Salud con nivel, último alivio y "Aliviar ahora"; tool `mem_info`; medir antes/después |
 | P0.4 | Build y prueba del instalador | Pendiente | Packaging | `installer/build.ps1` genera setup + hashes; instalación/desinstalación limpia en VM; tarea elevada opcional funciona |
 | P0.5 | Smoke test de UI | Pendiente | QA | Arranque, tres tabs, cambio de perfil, alivio, cierre sin matar motor |
 | P0.6 | Release gate ejecutado | Pendiente | Release | Checklist completo, hashes, tres `.exe` + setup, benchmark con alcance |
@@ -77,15 +77,15 @@ Tests actuales: **14 en verde, 1 ignorado** (`cargo test --all-targets`) — con
 
 | # | Trabajo | Estado | Criterio de aceptación |
 |---|---|---|---|
-| P1.1 | Puerto configurable para la UI | Pendiente | `domador-ui --port N` o `DOMADOR_PORT`; deja de estar hardcodeado 8787 |
+| P1.1 | Puerto configurable para la UI | Hecho (v0.7.0, `DOMADOR_PORT`) | `domador-ui --port N` o `DOMADOR_PORT`; deja de estar hardcodeado 8787 |
 | P1.2 | CPU sets | Pendiente | Aplicar CPU sets además de máscaras; fallback a afinidad si el SO no lo soporta |
 | P1.3 | Firma de código | Pendiente | `build.ps1 -Sign` produce setup y `.exe` firmados; `verify-hashes -RequireSignature` pasa |
 | P1.4 | Benchmark de UI nativa | Pendiente | RAM/CPU de `domador-ui.exe` medidos con `bench.py --ui`, publicados con fecha |
 | P1.5 | Benchmark FPS | Pendiente | CapFrameX, mismo juego/escena, con y sin perfil Juego; metodología archivada |
 | P1.6 | Historial de consumo | Pendiente | Serie por proceso con retención acotada; sin crecimiento infinito |
-| P1.7 | UI de grupos Chrome/WebView/Electron | Pendiente | Acción por familia (el motor ya agrega `families`), confirmación para matar |
+| P1.7 | UI de grupos Chrome/WebView/Electron | Hecho (v0.7.0, tarjeta Familias: Eco/Liberar/Restaurar) | Acción por familia (el motor ya agrega `families`), confirmación para matar |
 | P1.8 | Gestión de inicio | Pendiente | Listar/deshabilitar startups con confirmación y reversión |
-| P1.9 | Más tools MCP | Pendiente | `mem_info`, `trim_idle`, `admin_status`; errores JSON-RPC correctos |
+| P1.9 | Más tools MCP | En curso (`mem_info`, `trim_idle`, `families` hechos; falta `admin_status`) | `mem_info`, `trim_idle`, `admin_status`; errores JSON-RPC correctos |
 | P1.10 | Actualización opt-in integrada | Pendiente | La UI puede lanzar `check-update.ps1`; nunca silencioso |
 | P1.11 | Legion 5 Pro: modos térmicos, fans y límites de CPU | Pendiente | WMI `LENOVO_GAMEZONE_DATA`, `LENOVO_FAN_METHOD`, `LENOVO_CPU_METHOD`; admin, backup de curva stock y un solo dueño del EC. Detalle en `docs/LEGION-TUNING.md` |
 
