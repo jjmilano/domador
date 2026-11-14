@@ -65,7 +65,6 @@ const COMPETITOR_PREFIXES: &[&str] = &[
     "lenovovantage",
     "legionarena",
     "vantagebridgeplugin",
-    "legionfancontrol",
     "lenovolegiontoolkit",
     "uxtu",
     "ryzencontroller",
@@ -73,7 +72,9 @@ const COMPETITOR_PREFIXES: &[&str] = &[
 ];
 
 /// Nunca se matan, aunque un prefijo los alcance por error.
-const PROTECTED_PREFIXES: &[&str] = &["domador", "lenovohotkeys"];
+/// Legion Fan Control es el dueño de la curva de fans en las Gen 6 (el BIOS no
+/// deja hacerlo por WMI): convive con Domador y el modo jefe no lo cierra.
+const PROTECTED_PREFIXES: &[&str] = &["domador", "lenovohotkeys", "legionfancontrol"];
 
 // ------------------------------------------------------------------ errores
 
@@ -1760,7 +1761,6 @@ mod tests {
             "LenovoVantage-(GenericMessagingAddin).exe",
             "LegionArena.exe",
             "VantageBridgePlugin",
-            "LegionFanControl.exe",
             "LenovoLegionToolkit.exe",
             "UXTU.exe",
             "RyzenController.exe",
@@ -1780,6 +1780,8 @@ mod tests {
         }
         assert!(is_protected("domador-ui.exe"));
         assert!(is_protected("LenovoHotkeys"));
+        assert!(is_protected("LegionFanControl.exe"));
+        assert!(!is_competitor("LegionFanControl.exe"));
     }
 
     #[test]
