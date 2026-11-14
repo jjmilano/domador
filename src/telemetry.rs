@@ -321,7 +321,10 @@ fn collect(gpu: &mut GpuCache) -> (Sample, bool, Option<String>) {
 
     gpu.refresh();
 
-    let cpu_temp = sanitize_temp(status.pointer("/temps/cpu").and_then(Value::as_f64));
+    // El BIOS Gen 6 no da la temperatura del CPU: se lee del sensor del
+    // procesador con PawnIO si está instalado (ver `cputemp`).
+    let cpu_temp = sanitize_temp(status.pointer("/temps/cpu").and_then(Value::as_f64))
+        .or_else(|| sanitize_temp(crate::cputemp::read()));
     let gpu_temp = sanitize_temp(status.pointer("/temps/gpu").and_then(Value::as_f64))
         .or_else(|| sanitize_temp(gpu.temp));
     let fan1_rpm = status

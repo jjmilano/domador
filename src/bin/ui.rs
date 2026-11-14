@@ -3671,6 +3671,32 @@ impl DomadorUi {
             notice(ui, width, err.title(), &err.body(), err.color());
             ui.add_space(10.0);
         }
+        // Temperatura del CPU: el BIOS no la da; viene de PawnIO si está.
+        if motor && admin {
+            let source = data
+                .as_deref()
+                .and_then(|d| d.pointer("/cpu_temp/source"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("none");
+            if source != "pawnio" {
+                let reason = data
+                    .as_deref()
+                    .and_then(|d| d.pointer("/cpu_temp/error"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                notice(
+                    ui,
+                    width,
+                    "Falta la temperatura del CPU",
+                    &format!(
+                        "Tu BIOS no la publica. Domador la puede leer directo del procesador (como HWiNFO o LibreHardwareMonitor) con el driver firmado PawnIO, sólo en lectura. Instalalo una vez desde una terminal: winget install namazso.PawnIO, y reiniciá Domador. Con eso el modo Máximo también cuida el CPU, no sólo la GPU.{}",
+                        if reason.is_empty() { String::new() } else { format!(" ({reason})") }
+                    ),
+                    BRASS,
+                );
+                ui.add_space(10.0);
+            }
+        }
         if motor && !admin {
             admin_notice(ui, width, busy, &mut intents);
             ui.add_space(10.0);

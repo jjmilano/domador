@@ -186,7 +186,17 @@ fn handle(mut request: Request, engine: Shared) {
             // contrato vive en docs/LEGION-API.md.
             "/api/legion" => {
                 crate::telemetry::ensure_started();
-                let status = crate::legion::status();
+                let mut status = crate::legion::status();
+                if status
+                    .pointer("/temps/cpu")
+                    .map(|v| v.is_null())
+                    .unwrap_or(true)
+                {
+                    if let Some(temp) = crate::cputemp::read() {
+                        status["temps"]["cpu"] = json!((temp * 10.0).round() / 10.0);
+                    }
+                }
+                status["cpu_temp"] = crate::cputemp::source();
                 return reply(request, 200, &status);
             }
             // Historial de telemetría (ring de 24 h). Nunca 500: si WMI no

@@ -1,6 +1,7 @@
 pub mod adaptive;
 pub mod api;
 pub mod config;
+pub mod cputemp;
 pub mod engine;
 pub mod gpu;
 pub mod legion;
