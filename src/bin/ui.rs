@@ -6514,6 +6514,9 @@ struct AdaptiveData {
     gpu_power: Option<f64>,
     on_ac: Option<bool>,
     slope: Option<f64>,
+    cpu_temp: Option<f64>,
+    gpu_temp: Option<f64>,
+    driver: String,
 }
 
 #[derive(Clone, Debug)]
@@ -6596,6 +6599,9 @@ fn get_adaptive() -> Result<AdaptiveData, AdaptiveErr> {
                 gpu_power: sample_num(&value, &["gpu_power_w"]),
                 on_ac: jbool(&value, &["on_ac"]),
                 slope: sample_num(&value, &["slope_c_s"]),
+                cpu_temp: sample_num(&value, &["cpu_temp_c"]),
+                gpu_temp: sample_num(&value, &["gpu_temp_c"]),
+                driver: jstr(&value, &["driver"]).unwrap_or("").to_string(),
             })
         }
         Err(ureq::Error::Status(code, response)) => Err(AdaptiveErr::from_status(
@@ -7970,6 +7976,23 @@ fn legion_adaptive_card(
                     None => ("Cargador: —", FAINT),
                 };
                 badge(ui, ac.0, ac.1, a(ac.1, 20));
+                for (label, value, key) in [("CPU", d.cpu_temp, "cpu"), ("GPU", d.gpu_temp, "gpu")] {
+                    if let Some(t) = value {
+                        let leads = d.driver == key;
+                        let color = if leads { BRASS } else { MUTED };
+                        badge(
+                            ui,
+                            &format!("{label} {t:.0} °C{}", if leads { " · manda" } else { "" }),
+                            color,
+                            a(color, if leads { 26 } else { 14 }),
+                        )
+                        .on_hover_text(if key == "cpu" {
+                            "El CPU se frena ~95 °C: para compararlo con la GPU (~87 °C) se le restan 8 °C y se suaviza, porque salta mucho."
+                        } else {
+                            "La RTX 3070 Laptop empieza a bajar clocks cerca de 87 °C."
+                        });
+                    }
+                }
                 if let Some(w) = d.gpu_power {
                     badge(ui, &format!("GPU {w:.0} W"), MUTED, a(MUTED, 16));
                 }

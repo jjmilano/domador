@@ -222,6 +222,10 @@ struct State {
     power_since: Option<f64>,
     /// Qué está haciendo el control y por qué, en castellano llano.
     explain: String,
+    cpu_smooth: Option<f64>,
+    last_cpu: Option<f64>,
+    last_gpu: Option<f64>,
+    driver: &'static str,
 }
 
 /// Parámetros del modo Máximo. Calibrados para la Legion 5 Pro Gen 6: la
@@ -230,6 +234,36 @@ const MAX_SLOPE_C_PER_S: f64 = 0.4;
 const MAX_POWER_W: f64 = 85.0;
 const MAX_IDLE_POWER_W: f64 = 55.0;
 const MAX_REST_S: f64 = 120.0;
+/// El 5800H se frena ~95 °C y la RTX 3070 Laptop ~87 °C: para comparar los
+/// dos con los mismos umbrales, al CPU se le restan 8 °C ("equivalente GPU").
+const CPU_HEADROOM_C: f64 = 8.0;
+/// Suavizado exponencial del CPU: Tctl salta ±10 °C en un segundo con cada
+/// ráfaga corta; sin esto la pendiente dispararía los fans por nada.
+const CPU_EMA_ALPHA: f64 = 0.35;
+
+/// Combina CPU y GPU en una sola temperatura de control y dice quién manda.
+/// `cpu_smooth` guarda el CPU suavizado entre muestras.
+fn control_temp(
+    cpu: Option<f64>,
+    gpu: Option<f64>,
+    cpu_smooth: &mut Option<f64>,
+) -> Option<(f64, &'static str)> {
+    let cpu = cpu.map(|raw| {
+        let next = match *cpu_smooth {
+            Some(prev) => prev + CPU_EMA_ALPHA * (raw - prev),
+            None => raw,
+        };
+        *cpu_smooth = Some(next);
+        next - CPU_HEADROOM_C
+    });
+    match (cpu, gpu) {
+        (Some(c), Some(g)) if c > g => Some((c, "cpu")),
+        (Some(_), Some(g)) => Some((g, "gpu")),
+        (Some(c), None) => Some((c, "cpu")),
+        (None, Some(g)) => Some((g, "gpu")),
+        (None, None) => None,
+    }
+}
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 
@@ -290,6 +324,10 @@ impl State {
             last_thermal: None,
             power_since: None,
             explain: String::new(),
+            cpu_smooth: None,
+            last_cpu: None,
+            last_gpu: None,
+            driver: "",
         }
     }
 
@@ -454,21 +492,34 @@ impl State {
         }
 
         // Explicación del estado actual (aunque no haya acción).
+        let sensors = match (self.last_cpu, self.last_gpu) {
+            (Some(c), Some(g)) => format!(
+                "CPU {c:.0} °C · GPU {g:.0} °C (manda {})",
+                if self.driver == "cpu" {
+                    "el CPU"
+                } else {
+                    "la GPU"
+                }
+            ),
+            (Some(c), None) => format!("CPU {c:.0} °C"),
+            (None, Some(g)) => format!("GPU {g:.0} °C"),
+            (None, None) => format!("{temp:.0} °C"),
+        };
         self.explain = if !ac {
             format!(
-                "Con batería: no fuerzo Performance (la GPU igual queda limitada y la batería dura minutos). {temp:.0} °C."
+                "Con batería: no fuerzo Performance (la GPU igual queda limitada y la batería dura minutos). {sensors}."
             )
         } else if self.level >= 2 {
-            format!("Freno de emergencia: {temp:.0} °C con fans a fondo. CPU un paso abajo hasta que enfríe.")
+            format!("Freno de emergencia: {sensors} con fans a fondo. CPU un paso abajo hasta que enfríe.")
         } else if self.level == 1 {
             format!(
-                "Fans a fondo · {temp:.0} °C · GPU {} · pendiente {slope:+.2} °C/s. Vuelvo a auto tras {:.0} s de reposo.",
+                "Fans a fondo · {sensors} · GPU {} · pendiente {slope:+.2} °C/s. Vuelvo a auto tras {:.0} s de reposo.",
                 power.map(|w| format!("{w:.0} W")).unwrap_or_else(|| "—".into()),
                 MAX_REST_S
             )
         } else {
             format!(
-                "Listo y mirando: {temp:.0} °C, GPU {}. Si la temperatura sube rápido o la GPU pasa {MAX_POWER_W:.0} W, pongo los fans a fondo antes de que caliente.",
+                "Listo y mirando: {sensors}, GPU {}. Si la temperatura sube rápido o la GPU pasa {MAX_POWER_W:.0} W, pongo los fans a fondo antes de que caliente.",
                 power.map(|w| format!("{w:.0} W")).unwrap_or_else(|| "—".into())
             )
         };
@@ -714,16 +765,16 @@ fn execute(intent: Intent) -> Result<String, String> {
 /// (no toca su mutex) y nunca escribe si falta admin/WMI.
 pub fn observe(sample: &Sample, available: bool) {
     let admin = crate::win::is_admin();
-    let temp = match (sample.cpu_temp, sample.gpu_temp) {
-        (Some(cpu), Some(gpu)) => Some(cpu.max(gpu)),
-        (Some(cpu), None) => Some(cpu),
-        (None, Some(gpu)) => Some(gpu),
-        (None, None) => None,
-    };
-
     let now = now_epoch();
     let decision = {
         let mut state = lock();
+        let mut smooth = state.cpu_smooth;
+        let combined = control_temp(sample.cpu_temp, sample.gpu_temp, &mut smooth);
+        state.cpu_smooth = smooth;
+        state.last_cpu = sample.cpu_temp;
+        state.last_gpu = sample.gpu_temp;
+        state.driver = combined.map(|(_, who)| who).unwrap_or("");
+        let temp = combined.map(|(temp, _)| temp);
         state.last_admin = admin;
         state.last_available = Some(available);
         match temp {
@@ -833,6 +884,9 @@ pub fn status() -> Value {
         "last_temp_c": state.last_temp,
         "explain": if state.cfg.enabled { json!(state.explain) } else { Value::Null },
         "gpu_power_w": state.last_power,
+        "cpu_temp_c": state.last_cpu,
+        "gpu_temp_c": state.last_gpu,
+        "driver": state.driver,
         "on_ac": state.last_ac,
         "slope_c_s": state.slope(now).map(|v| (v * 100.0).round() / 100.0),
         "busy": state.busy,
@@ -1166,6 +1220,25 @@ mod tests {
         assert_eq!(
             state.decide_max(13.0, 91.0, Some(130.0), true, Some(3)),
             Some((Intent::CpuDown, "critico"))
+        );
+    }
+
+    #[test]
+    fn cpu_se_compara_con_su_margen_y_se_suaviza() {
+        let mut smooth = None;
+        // CPU 80 → equivale a 72 de GPU; GPU 70: manda el CPU.
+        assert_eq!(
+            control_temp(Some(80.0), Some(70.0), &mut smooth),
+            Some((72.0, "cpu"))
+        );
+        // Un pico de 100 °C de un segundo no salta entero: 80 + 0,35·20 = 87 → 79.
+        let (temp, who) = control_temp(Some(100.0), Some(70.0), &mut smooth).unwrap();
+        assert_eq!(who, "cpu");
+        assert!((temp - 79.0).abs() < 0.01);
+        // Sin CPU, manda la GPU.
+        assert_eq!(
+            control_temp(None, Some(65.0), &mut None),
+            Some((65.0, "gpu"))
         );
     }
 }
