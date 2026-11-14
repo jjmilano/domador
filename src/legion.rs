@@ -174,6 +174,13 @@ pub fn probe() -> Value {
     }
 }
 
+/// Lee `Fan_Get_FullSpeed` sin cache (para verificar una escritura).
+pub fn sample_full_speed() -> Option<bool> {
+    send(JobReq::Fresh)
+        .ok()
+        .and_then(|status| status.get("full_speed").and_then(Value::as_bool))
+}
+
 /// Nombre estable del modo térmico (`quiet|balance|performance|custom`) o
 /// `unknown`. Lo usan la telemetría y el control adaptativo.
 pub fn thermal_key(id: u8) -> String {
@@ -293,6 +300,7 @@ fn parse_mode(value: Option<&Value>) -> Option<u8> {
 #[derive(Clone)]
 enum JobReq {
     Status,
+    Fresh,
     Sample,
     Probe,
     Thermal {
@@ -377,6 +385,10 @@ fn worker(rx: Receiver<Job>) {
     for job in rx {
         let result = match job.req {
             JobReq::Status => Ok(ctx.status()),
+            JobReq::Fresh => {
+                ctx.cache = None;
+                Ok(ctx.status())
+            }
             JobReq::Sample => Ok(ctx.sample()),
             JobReq::Probe => Ok(ctx.probe()),
             JobReq::Thermal { id } => ctx.apply_thermal(id),
@@ -1102,7 +1114,11 @@ impl Ctx {
         let current_full = self.read_full_speed().ok();
 
         let mut backup = load_backup().unwrap_or_default();
-        if backup.fan_table_stock.is_none() {
+        // El backup de la tabla stock sólo hace falta si se va a escribir una
+        // tabla. "Full speed" es un interruptor aparte: en BIOS que no publican
+        // la tabla (Legion Gen 6, GKCN) exigirlo bloqueaba poner los fans a
+        // fondo y el modo Máximo no podía actuar.
+        if table.is_some() && backup.fan_table_stock.is_none() {
             // Nunca se escribe una tabla sin stock real de fábrica.
             let stock = current_table
                 .clone()
@@ -1119,7 +1135,9 @@ impl Ctx {
         }
         backup.saved_at = now_epoch();
         save_backup(&backup)?;
-        self.stock = backup.fan_table_stock.clone();
+        if backup.fan_table_stock.is_some() {
+            self.stock = backup.fan_table_stock.clone();
+        }
 
         let mut wrote_table = false;
         if let Some(ref levels) = table {

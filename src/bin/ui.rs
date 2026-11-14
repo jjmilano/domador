@@ -7945,7 +7945,7 @@ fn legion_adaptive_card(
             ui.add(
                 egui::Label::new(
                     RichText::new(
-                        "Modo Máximo: 1) con cargador pone Performance (la GPU puede usar 140 W en vez de ~115). 2) Si la temperatura sube más de 0,4 °C por segundo o la GPU pasa 85 W, pone los fans a fondo antes de que llegue el calor: un chip frío sostiene más MHz. 3) Si aun así pasa 90 °C durante 12 s, baja el CPU un escalón para proteger. 4) Vuelve a fans automáticos recién tras 2 minutos de reposo, para no subir y bajar cada rato.",
+                        "Modo Máximo: 1) con cargador pone Rendimiento (la GPU puede usar 140 W en vez de ~115). 2) Mira CPU y GPU; si la temperatura sube rápido o la GPU pasa 85 W, intenta poner los fans a fondo antes de que llegue el calor. Si tu BIOS no lo permite (las Legion Gen 6 no lo aplican), lo detecta, no insiste y los fans siguen la curva de Rendimiento, que ya sube hasta ~4400 RPM. 3) Si pasa 90 °C durante 12 s, baja el CPU un escalón para proteger. 4) Vuelve atrás tras 2 minutos de reposo.",
                     )
                     .size(10.0)
                     .color(MUTED),

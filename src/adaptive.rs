@@ -226,6 +226,9 @@ struct State {
     last_cpu: Option<f64>,
     last_gpu: Option<f64>,
     driver: &'static str,
+    /// El BIOS acepta Fan_Set_FullSpeed pero no lo aplica (Legion Gen 6,
+    /// GKCN): se detecta leyendo de vuelta y no se insiste más.
+    fans_unsupported: bool,
 }
 
 /// Parámetros del modo Máximo. Calibrados para la Legion 5 Pro Gen 6: la
@@ -328,6 +331,7 @@ impl State {
             last_cpu: None,
             last_gpu: None,
             driver: "",
+            fans_unsupported: false,
         }
     }
 
@@ -505,7 +509,12 @@ impl State {
             (None, Some(g)) => format!("GPU {g:.0} °C"),
             (None, None) => format!("{temp:.0} °C"),
         };
-        self.explain = if !ac {
+        self.explain = if self.fans_unsupported && self.level < 2 && ac {
+            format!(
+                "{sensors}. Tu BIOS maneja los fans solo (no acepta 'a fondo'): en Rendimiento suben hasta ~4400 RPM por su cuenta. Domador mantiene Rendimiento y, si pasa {:.0} °C sostenido, frena el CPU un escalón.",
+                self.cfg.critical_c
+            )
+        } else if !ac {
             format!(
                 "Con batería: no fuerzo Performance (la GPU igual queda limitada y la batería dura minutos). {sensors}."
             )
@@ -528,6 +537,26 @@ impl State {
         // 1) Enchufada → modo Performance (lo único que destraba los 140 W de la GPU).
         if ac && thermal.is_some() && thermal != Some(3) && cooldown_ok {
             return Some((Intent::ModePerf, "enchufada"));
+        }
+        if self.fans_unsupported {
+            // Sin control de fans: sólo queda el freno de CPU y su vuelta.
+            if self.level < 2 && critical && cooldown_ok {
+                let held = self
+                    .hot_since
+                    .map(|start| now - start >= self.cfg.dwell_s * 3.0)
+                    .unwrap_or(false);
+                if held {
+                    return Some((Intent::CpuDown, "critico"));
+                }
+            }
+            let rested = self
+                .cool_since
+                .map(|start| now - start >= MAX_REST_S)
+                .unwrap_or(false);
+            if self.level == 2 && rested && cooldown_ok {
+                return Some((Intent::CpuRestore, "enfriado"));
+            }
+            return None;
         }
         // 2) Subir: anticipar es inmediato; potencia y calor piden sostenerse.
         if self.level == 0 {
@@ -619,6 +648,16 @@ impl State {
                     self.last_thermal = Some(3);
                 }
             }
+        } else if intent == Intent::FansOn && detail == FANS_IGNORED {
+            // No es un fallo a reintentar: el firmware no lo soporta. Se pasa
+            // al escalón 1 "virtual" para que el freno de CPU siga disponible.
+            self.fans_unsupported = true;
+            self.level = 1;
+            self.hot_since = None;
+            if let Some(base) = self.baseline.as_mut() {
+                base.full_speed = None;
+            }
+            self.last_error = None;
         } else {
             self.failures = self.failures.saturating_add(1);
             self.last_error = Some(detail.clone());
@@ -686,15 +725,23 @@ impl State {
     }
 }
 
+const FANS_IGNORED: &str =
+    "el BIOS acepta 'fans a fondo' pero no lo aplica: los fans siguen la curva automática";
+
 /// Ejecuta la escritura real. Sólo se llama con admin + WMI disponible.
 fn execute(intent: Intent) -> Result<String, String> {
     match intent {
         Intent::ModePerf => legion::set_thermal(&json!({"mode": 3}))
             .map(|_| "modo Performance (GPU hasta 140 W)".to_string())
             .map_err(|err| err.message),
-        Intent::FansOn => legion::set_fans(&json!({"full_speed": true}))
-            .map(|_| "full speed activado".to_string())
-            .map_err(|err| err.message),
+        Intent::FansOn => {
+            legion::set_fans(&json!({"full_speed": true})).map_err(|err| err.message)?;
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            if legion::sample_full_speed() == Some(false) {
+                return Err(FANS_IGNORED.to_string());
+            }
+            Ok("full speed activado".to_string())
+        }
         Intent::FansOff => {
             let prior = {
                 let state = lock();
@@ -887,6 +934,7 @@ pub fn status() -> Value {
         "cpu_temp_c": state.last_cpu,
         "gpu_temp_c": state.last_gpu,
         "driver": state.driver,
+        "fans_unsupported": state.fans_unsupported,
         "on_ac": state.last_ac,
         "slope_c_s": state.slope(now).map(|v| (v * 100.0).round() / 100.0),
         "busy": state.busy,
@@ -1239,6 +1287,26 @@ mod tests {
         assert_eq!(
             control_temp(None, Some(65.0), &mut None),
             Some((65.0, "gpu"))
+        );
+    }
+
+    #[test]
+    fn max_sin_fans_solo_frena_cpu() {
+        let mut state = max_controller();
+        state.fans_unsupported = true;
+        state.level = 1;
+        // Carga fuerte pero sin crítico: no insiste con los fans.
+        assert_eq!(
+            state.decide_max(0.0, 75.0, Some(130.0), true, Some(3)),
+            None
+        );
+        assert_eq!(
+            state.decide_max(6.0, 91.0, Some(130.0), true, Some(3)),
+            None
+        );
+        assert_eq!(
+            state.decide_max(19.0, 91.0, Some(130.0), true, Some(3)),
+            Some((Intent::CpuDown, "critico"))
         );
     }
 }
